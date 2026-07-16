@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "story-studio-public-webnovel-v1",
+  "suiteRevision": 2,
+  "suiteDigest": "a606028792257a34b24c9eb7d6d41d6c271363ef10289073ea2b70055318b090",
+  "builtinProfileRevision": 1,
+  "reportDigest": "f69429c5ade48e8909d2e779bc12fc3e4d04fc208681b0425bd760468841e8b6",
+  "metrics": {
+    "cases": 10,
+    "passedCases": 10,
+    "casePassRate": 1,
+    "profileCompilations": 48,
+    "passedProfileCompilations": 48,
+    "profileCompileRate": 1,
+    "blockers": 2,
+    "majors": 5,
+    "blockersPerThousandUnits": 3.007518796992481,
+    "majorsPerThousandUnits": 7.518796992481203
+  }
+}

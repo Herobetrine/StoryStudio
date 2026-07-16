@@ -1,0 +1,1210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#121110">
+    <title>长篇工坊</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <section id="story_studio_workspace" class="ss-workspace" aria-label="长篇工坊">
+        <a class="ss-skip-link" href="#ss_manuscript">跳到正文编辑区</a>
+
+        <header class="ss-header">
+            <div class="ss-brand" aria-label="长篇工坊">
+                <span class="ss-brand-mark" aria-hidden="true">章</span>
+                <span class="ss-brand-copy">
+                    <strong>长篇工坊</strong>
+                    <small>STORY STUDIO</small>
+                </span>
+            </div>
+
+            <div class="ss-project-switcher">
+                <label class="ss-visually-hidden" for="ss_project_select">当前作品</label>
+                <select id="ss_project_select" class="ss-control" aria-label="当前作品"></select>
+                <button id="ss_new_project" class="ss-icon-button" type="button" title="新建作品" aria-label="新建作品" aria-expanded="false" aria-controls="ss_create_project_form">
+                    <img class="ss-icon" src="/icons/folder-plus.svg" alt="">
+                </button>
+            </div>
+
+            <nav class="ss-view-tabs" role="tablist" aria-label="工作区">
+                <button id="ss_today_tab" class="ss-tab" type="button" role="tab" data-ss-view="today" aria-label="今日工作台" aria-selected="false" aria-controls="ss_today_view" tabindex="-1">今日</button>
+                <button id="ss_write_tab" class="ss-tab is-active" type="button" role="tab" data-ss-view="write" aria-label="写作" aria-selected="true" aria-controls="ss_write_view">写作</button>
+                <button id="ss_bible_tab" class="ss-tab" type="button" role="tab" data-ss-view="bible" aria-label="作品设定" aria-selected="false" aria-controls="ss_bible_view" tabindex="-1">设定</button>
+                <button id="ss_ledger_tab" class="ss-tab" type="button" role="tab" data-ss-view="ledger" aria-label="连续性账本" aria-selected="false" aria-controls="ss_ledger_view" tabindex="-1">账本</button>
+                <button id="ss_copilot_tab" class="ss-tab" type="button" role="tab" data-ss-view="copilot" aria-label="策划 Copilot" aria-selected="false" aria-controls="ss_copilot_view" tabindex="-1">策划</button>
+                <button id="ss_workflow_tab" class="ss-tab" type="button" role="tab" data-ss-view="workflow" aria-label="章节流程" aria-selected="false" aria-controls="ss_workflow_view" tabindex="-1">流程</button>
+                <button id="ss_quality_tab" class="ss-tab" type="button" role="tab" data-ss-view="quality" aria-label="质量系统" aria-selected="false" aria-controls="ss_quality_view" tabindex="-1">质量</button>
+                <button id="ss_resources_tab" class="ss-tab" type="button" role="tab" data-ss-view="resources" aria-label="资源" aria-selected="false" aria-controls="ss_resources_view" tabindex="-1">资源</button>
+            </nav>
+
+            <div class="ss-header-actions">
+                <button id="ss_toggle_binder" class="ss-icon-button ss-mobile-only" type="button" title="章节" aria-label="打开章节列表" aria-expanded="false" aria-controls="ss_binder">
+                    <img class="ss-icon" src="/icons/list-ordered.svg" alt="">
+                </button>
+                <button id="ss_toggle_inspector" class="ss-icon-button ss-mobile-only" type="button" title="检查器" aria-label="打开检查器" aria-expanded="false" aria-controls="ss_inspector">
+                    <img class="ss-icon" src="/icons/panel-right.svg" alt="">
+                </button>
+                <button id="ss_save" class="ss-icon-button" type="button" title="保存" aria-label="保存">
+                    <img class="ss-icon" src="/icons/save.svg" alt="">
+                </button>
+                <button id="ss_export" class="ss-icon-button" type="button" title="导出作品" aria-label="导出作品">
+                    <img class="ss-icon" src="/icons/file-output.svg" alt="">
+                </button>
+                <button id="ss_import" class="ss-icon-button" type="button" title="导入作品" aria-label="导入作品">
+                    <img class="ss-icon" src="/icons/file-input.svg" alt="">
+                </button>
+                <button id="ss_open_provider" class="ss-icon-button" type="button" title="模型设置" aria-label="打开模型设置" aria-expanded="false" aria-controls="ss_provider_drawer">
+                    <img class="ss-icon" src="/icons/settings-2.svg" alt="">
+                </button>
+            </div>
+        </header>
+
+        <form id="ss_create_project_form" class="ss-create-strip" hidden>
+            <label>
+                <span>作品名</span>
+                <input id="ss_create_title" class="ss-control" type="text" maxlength="160" required autocomplete="off">
+            </label>
+            <label>
+                <span>类型</span>
+                <input id="ss_create_genre" class="ss-control" type="text" maxlength="80" autocomplete="off">
+            </label>
+            <button class="ss-button ss-button-primary" type="submit" aria-label="创建作品">
+                <img class="ss-icon" src="/icons/check.svg" alt="">
+                <span>创建作品</span>
+            </button>
+            <button id="ss_cancel_create" class="ss-button" type="button" aria-label="取消新建作品">取消</button>
+        </form>
+
+        <div class="ss-status-band">
+            <span id="ss_save_status" class="ss-save-status" role="status">正在连接</span>
+            <progress id="ss_progress" class="ss-progress" aria-label="作品字数进度" aria-valuetext="暂无作品" max="1" value="0"></progress>
+            <span id="ss_project_metrics" class="ss-project-metrics">0 字 · 0 章</span>
+        </div>
+
+        <div id="ss_empty_state" class="ss-empty-state" hidden>
+            <span class="ss-empty-glyph" aria-hidden="true">章</span>
+            <h1>从第一章开始</h1>
+            <p>新建作品，正文、设定与连续性账本将独立保存在本机。</p>
+            <button id="ss_empty_create" class="ss-button ss-button-primary" type="button" aria-label="新建作品">
+                <img class="ss-icon" src="/icons/folder-plus.svg" alt="">
+                <span>新建作品</span>
+            </button>
+        </div>
+
+        <div id="ss_bootstrap_error" class="ss-empty-state" hidden>
+            <span class="ss-empty-glyph ss-error-glyph" aria-hidden="true">!</span>
+            <h1>无法连接工作台</h1>
+            <p id="ss_bootstrap_error_message">本地服务暂时不可用。</p>
+            <button id="ss_retry_bootstrap" class="ss-button ss-button-primary" type="button" aria-label="重新连接本地服务">
+                <img class="ss-icon" src="/icons/refresh-cw.svg" alt="">
+                <span>重新连接</span>
+            </button>
+        </div>
+
+        <div id="ss_shell" class="ss-shell" hidden>
+            <aside id="ss_binder" class="ss-binder" aria-label="卷章目录">
+                <div class="ss-panel-heading">
+                    <div>
+                        <span class="ss-eyebrow">MANUSCRIPT</span>
+                        <h2>卷章目录</h2>
+                    </div>
+                    <div class="ss-panel-actions">
+                        <button id="ss_add_volume" class="ss-icon-button" type="button" title="新建卷" aria-label="新建卷">
+                            <img class="ss-icon" src="/icons/folder-plus.svg" alt="">
+                        </button>
+                        <button id="ss_add_chapter" class="ss-icon-button" type="button" title="在当前卷新建章节" aria-label="在当前卷新建章节">
+                            <img class="ss-icon" src="/icons/plus.svg" alt="">
+                        </button>
+                    </div>
+                </div>
+                <label class="ss-search">
+                    <img class="ss-icon" src="/icons/search.svg" alt="">
+                    <span class="ss-visually-hidden">搜索章节</span>
+                    <input id="ss_chapter_search" type="search" placeholder="搜索章节" autocomplete="off">
+                </label>
+                <div id="ss_chapter_list" class="ss-chapter-list" role="tree" aria-label="卷与章节"></div>
+            </aside>
+
+            <main id="ss_main" class="ss-main">
+                <section id="ss_today_view" class="ss-view ss-dashboard-view" role="tabpanel" aria-labelledby="ss_today_tab" hidden>
+                    <div class="ss-section-heading ss-dashboard-heading">
+                        <div>
+                            <span class="ss-eyebrow">TODAY</span>
+                            <h1>今日工作台</h1>
+                        </div>
+                        <div class="ss-dashboard-heading-actions">
+                            <span id="ss_dashboard_status" class="ss-inline-status" role="status" aria-live="polite"></span>
+                            <button id="ss_dashboard_refresh" class="ss-icon-button" type="button" title="刷新今日工作台" aria-label="刷新今日工作台">
+                                <img class="ss-icon" src="/icons/refresh-cw.svg" alt="">
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="ss_dashboard_no_project" class="ss-dashboard-state" hidden>
+                        <strong>先选择一个作品</strong>
+                        <p>今日任务由当前作品的权威章节、卷纲和 Story State 确定性计算。</p>
+                    </div>
+                    <div id="ss_dashboard_loading" class="ss-dashboard-state" role="status" aria-live="polite" hidden>
+                        <strong>正在计算今天写什么</strong>
+                        <p>读取作品进度、章纲版本和伏笔债务。</p>
+                    </div>
+                    <div id="ss_dashboard_empty" class="ss-dashboard-state" hidden>
+                        <strong>今日投影尚未载入</strong>
+                        <p>刷新后会从当前权威项目状态重新计算，不会创建第二套任务数据。</p>
+                    </div>
+                    <section id="ss_dashboard_error" class="ss-dashboard-error" aria-labelledby="ss_dashboard_error_title" hidden>
+                        <div>
+                            <strong id="ss_dashboard_error_title">今日工作台载入失败</strong>
+                            <p id="ss_dashboard_error_message"></p>
+                        </div>
+                        <button id="ss_dashboard_retry" class="ss-button" type="button">
+                            <img class="ss-icon" src="/icons/refresh-cw.svg" alt=""><span>重试</span>
+                        </button>
+                    </section>
+
+                    <div id="ss_dashboard_workspace" class="ss-dashboard-workspace" hidden>
+                        <section class="ss-dashboard-lead" aria-label="今日优先事项与作品进度">
+                            <article class="ss-dashboard-next">
+                                <span class="ss-eyebrow">NEXT ACTION</span>
+                                <h2 id="ss_dashboard_next_label">今天从这里开始</h2>
+                                <p id="ss_dashboard_next_detail"></p>
+                                <div class="ss-dashboard-next-actions">
+                                    <button id="ss_dashboard_next_open" class="ss-button ss-button-primary" type="button">
+                                        <span>去处理</span><img class="ss-icon" src="/icons/arrow-right.svg" alt="">
+                                    </button>
+                                    <button id="ss_dashboard_next_workflow" class="ss-button" type="button" hidden>
+                                        <img class="ss-icon" src="/icons/route.svg" alt=""><span>进入章节流程</span>
+                                    </button>
+                                </div>
+                            </article>
+
+                            <section class="ss-dashboard-progress-panel" aria-labelledby="ss_dashboard_progress_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">PROGRESS</span>
+                                        <h2 id="ss_dashboard_progress_title">作品进度</h2>
+                                    </div>
+                                    <strong id="ss_dashboard_progress_percent">0%</strong>
+                                </header>
+                                <div class="ss-dashboard-word-total">
+                                    <strong id="ss_dashboard_total_words">0</strong>
+                                    <span>字 / <span id="ss_dashboard_target_words">0</span> 字</span>
+                                </div>
+                                <progress id="ss_dashboard_progress" class="ss-dashboard-progress" max="100" value="0" aria-label="作品总字数进度"></progress>
+                                <div id="ss_dashboard_chapter_summary" class="ss-dashboard-chapter-summary"></div>
+                                <div id="ss_dashboard_chapter_statuses" class="ss-dashboard-statuses" aria-label="章节状态统计"></div>
+                            </section>
+                        </section>
+
+                        <div class="ss-dashboard-grid">
+                            <section class="ss-dashboard-section ss-dashboard-work" aria-labelledby="ss_dashboard_work_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">WORK QUEUE</span>
+                                        <h2 id="ss_dashboard_work_title">今日工作项</h2>
+                                    </div>
+                                </header>
+                                <div id="ss_dashboard_work_list" class="ss-dashboard-action-list"></div>
+                                <p id="ss_dashboard_work_empty" class="ss-inline-empty" hidden>今天没有待处理工作项。</p>
+                            </section>
+
+                            <section class="ss-dashboard-section ss-dashboard-debts" aria-labelledby="ss_dashboard_debts_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">STORY DEBT</span>
+                                        <h2 id="ss_dashboard_debts_title">创作债务</h2>
+                                    </div>
+                                </header>
+                                <section class="ss-dashboard-debt-group" aria-labelledby="ss_dashboard_promises_title">
+                                    <div class="ss-dashboard-subheading">
+                                        <h3 id="ss_dashboard_promises_title">伏笔债务</h3>
+                                        <span id="ss_dashboard_promise_summary"></span>
+                                    </div>
+                                    <div id="ss_dashboard_promise_list" class="ss-dashboard-compact-list"></div>
+                                    <p id="ss_dashboard_promise_empty" class="ss-inline-empty" hidden>暂无未兑现伏笔。</p>
+                                </section>
+                                <section class="ss-dashboard-debt-group" aria-labelledby="ss_dashboard_stale_title">
+                                    <div class="ss-dashboard-subheading">
+                                        <h3 id="ss_dashboard_stale_title">章纲复核</h3>
+                                        <span id="ss_dashboard_stale_summary"></span>
+                                    </div>
+                                    <div id="ss_dashboard_stale_list" class="ss-dashboard-compact-list"></div>
+                                    <p id="ss_dashboard_stale_empty" class="ss-inline-empty" hidden>所有未完成章节都基于当前卷纲。</p>
+                                </section>
+                            </section>
+
+                            <section class="ss-dashboard-section ss-dashboard-story-state" aria-labelledby="ss_dashboard_story_state_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">STORY STATE</span>
+                                        <h2 id="ss_dashboard_story_state_title">权威状态摘要</h2>
+                                    </div>
+                                    <button class="ss-button" type="button" data-dashboard-view="ledger">
+                                        <span>查看账本</span><img class="ss-icon" src="/icons/arrow-right.svg" alt="">
+                                    </button>
+                                </header>
+                                <div id="ss_dashboard_story_state_summary" class="ss-dashboard-state-metrics"></div>
+                            </section>
+
+                            <section class="ss-dashboard-section ss-dashboard-recent" aria-labelledby="ss_dashboard_recent_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">RECENT CHAPTERS</span>
+                                        <h2 id="ss_dashboard_recent_title">近期章节</h2>
+                                    </div>
+                                </header>
+                                <div id="ss_dashboard_recent_list" class="ss-dashboard-compact-list"></div>
+                                <p id="ss_dashboard_recent_empty" class="ss-inline-empty" hidden>尚无章节记录。</p>
+                            </section>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="ss_write_view" class="ss-view" role="tabpanel" aria-labelledby="ss_write_tab">
+                    <div class="ss-editor-heading">
+                        <div class="ss-editor-heading-main">
+                            <span id="ss_editor_breadcrumb" class="ss-editor-breadcrumb"></span>
+                            <label class="ss-chapter-title-field">
+                                <span class="ss-visually-hidden">章节标题</span>
+                                <input id="ss_chapter_title" type="text" maxlength="160" autocomplete="off">
+                            </label>
+                        </div>
+                        <div class="ss-editor-controls">
+                            <label>
+                                <span class="ss-visually-hidden">所属卷</span>
+                                <select id="ss_chapter_volume" class="ss-control ss-volume-select" aria-label="所属卷"></select>
+                            </label>
+                            <label>
+                                <span class="ss-visually-hidden">章节状态</span>
+                                <select id="ss_chapter_status" class="ss-control ss-status-select" aria-label="章节状态">
+                                <option value="planned">待写</option>
+                                <option value="drafting">初稿</option>
+                                <option value="revising">修订</option>
+                                <option value="done">定稿</option>
+                                </select>
+                            </label>
+                        </div>
+                    </div>
+                    <textarea id="ss_manuscript" class="ss-manuscript" spellcheck="true" placeholder="正文"></textarea>
+                    <footer class="ss-editor-footer">
+                        <span id="ss_chapter_count">0 字</span>
+                        <span id="ss_chapter_updated"></span>
+                    </footer>
+                </section>
+
+                <section id="ss_bible_view" class="ss-view" role="tabpanel" aria-labelledby="ss_bible_tab" hidden>
+                    <div class="ss-section-heading">
+                        <div>
+                            <span class="ss-eyebrow">STORY BIBLE</span>
+                            <h1>作品设定</h1>
+                        </div>
+                    </div>
+                    <div class="ss-bible-form">
+                        <div class="ss-field-row ss-field-row-compact ss-project-basics">
+                            <label><span>作品名</span><input id="ss_project_title" class="ss-control" data-project-field="title" type="text" maxlength="160"></label>
+                            <label><span>类型</span><input id="ss_project_genre" class="ss-control" data-project-field="genre" type="text" maxlength="80"></label>
+                            <label><span>目标总字数</span><input id="ss_target_words" class="ss-control" data-project-field="targetWords" type="number" min="1000" max="100000000" step="1000"></label>
+                            <label><span>单章目标</span><input id="ss_chapter_target_words" class="ss-control" data-project-field="chapterTargetWords" type="number" min="100" max="100000" step="100"></label>
+                        </div>
+                        <label class="ss-wide-field"><span>一句话卖点</span><textarea data-story-field="logline" rows="2"></textarea></label>
+                        <label class="ss-wide-field"><span>核心命题</span><textarea data-story-field="premise" rows="4"></textarea></label>
+                        <div class="ss-field-row">
+                            <label><span>主角与欲望</span><textarea data-story-field="protagonist" rows="6"></textarea></label>
+                            <label><span>对立力量</span><textarea data-story-field="opposition" rows="6"></textarea></label>
+                        </div>
+                        <div class="ss-field-row">
+                            <label><span>世界规则</span><textarea data-story-field="world" rows="8"></textarea></label>
+                            <label><span>力量体系</span><textarea data-story-field="powerSystem" rows="8"></textarea></label>
+                        </div>
+                        <label class="ss-wide-field"><span>文风约束</span><textarea data-story-field="styleGuide" rows="6"></textarea></label>
+                        <label class="ss-wide-field"><span>总纲</span><textarea data-story-field="masterOutline" rows="14"></textarea></label>
+                        <section class="ss-volume-outline" aria-labelledby="ss_volume_outline_title">
+                            <div class="ss-subsection-heading ss-volume-outline-heading">
+                                <div>
+                                    <span class="ss-eyebrow">VOLUME OUTLINE</span>
+                                    <h2 id="ss_volume_outline_title">卷纲</h2>
+                                </div>
+                                <div class="ss-volume-outline-actions">
+                                    <button id="ss_volume_move_up" class="ss-icon-button" type="button" title="上移当前卷" aria-label="上移当前卷"><img class="ss-icon" src="/icons/arrow-up.svg" alt=""></button>
+                                    <button id="ss_volume_move_down" class="ss-icon-button" type="button" title="下移当前卷" aria-label="下移当前卷"><img class="ss-icon" src="/icons/arrow-down.svg" alt=""></button>
+                                    <button id="ss_volume_delete" class="ss-icon-button" type="button" title="删除当前空卷" aria-label="删除当前空卷"><img class="ss-icon" src="/icons/trash-2.svg" alt=""></button>
+                                </div>
+                            </div>
+                            <div class="ss-volume-picker-row">
+                                <label><span>当前卷</span><select id="ss_volume_outline_select" class="ss-control"></select></label>
+                                <span id="ss_volume_revision" class="ss-volume-revision"></span>
+                            </div>
+                            <label><span>卷名</span><input id="ss_volume_title" class="ss-control" data-volume-field="title" type="text" maxlength="160"></label>
+                            <label><span>本卷目标</span><textarea id="ss_volume_goal" data-volume-field="goal" rows="4"></textarea></label>
+                            <label><span>卷纲</span><textarea id="ss_volume_outline" data-volume-field="outline" rows="14"></textarea></label>
+                            <label><span>卷摘要</span><textarea id="ss_volume_summary" data-volume-field="summary" rows="6"></textarea></label>
+                        </section>
+                        <label class="ss-wide-field"><span>禁写项</span><textarea data-story-field="forbidden" rows="5"></textarea></label>
+                    </div>
+                </section>
+
+                <section id="ss_ledger_view" class="ss-view" role="tabpanel" aria-labelledby="ss_ledger_tab" hidden>
+                    <div class="ss-section-heading">
+                        <div>
+                            <span class="ss-eyebrow">CONTINUITY</span>
+                            <h1>连续性工作区</h1>
+                        </div>
+                        <span id="ss_story_state_status" class="ss-inline-status"></span>
+                    </div>
+                    <div class="ss-continuity-workspace">
+                        <div id="ss_story_state_counts" class="ss-story-state-counts"></div>
+                        <div id="ss_continuity_tabs" class="ss-continuity-tabs" role="group" aria-label="连续性视图">
+                            <button class="is-active" type="button" data-continuity-view="facts" aria-pressed="true">事实</button>
+                            <button type="button" data-continuity-view="knowledge" aria-pressed="false">人物知识</button>
+                            <button type="button" data-continuity-view="timeline" aria-pressed="false">时间线</button>
+                            <button type="button" data-continuity-view="relations" aria-pressed="false">关系</button>
+                            <button type="button" data-continuity-view="promises" aria-pressed="false">伏笔</button>
+                            <button type="button" data-continuity-view="events" aria-pressed="false">幕后事件</button>
+                        </div>
+                        <div id="ss_continuity_records" class="ss-continuity-records" role="list"></div>
+                        <div id="ss_continuity_empty" class="ss-inline-empty" hidden>当前视图暂无记录</div>
+
+                        <section class="ss-pending-workspace" aria-labelledby="ss_pending_workspace_title">
+                            <div class="ss-subsection-heading">
+                                <div>
+                                    <span class="ss-eyebrow">PENDING CHANGES</span>
+                                    <h2 id="ss_pending_workspace_title">待处理 ChangeSet</h2>
+                                </div>
+                            </div>
+                            <div class="ss-pending-grid">
+                                <section class="ss-pending-panel" aria-labelledby="ss_generation_changeset_title">
+                                    <header>
+                                        <strong id="ss_generation_changeset_title">模型蒸馏</strong>
+                                        <span id="ss_generation_changeset_status" class="ss-inline-status"></span>
+                                    </header>
+                                    <p id="ss_generation_changeset_summary" class="ss-pending-summary"></p>
+                                    <div id="ss_generation_changeset_counts" class="ss-distillation-counts"></div>
+                                    <pre id="ss_generation_changeset_json" class="ss-pending-json"></pre>
+                                </section>
+                                <section class="ss-pending-panel" aria-labelledby="ss_pending_changeset_title">
+                                    <header>
+                                        <strong id="ss_pending_changeset_title">手工草稿</strong>
+                                        <span id="ss_pending_changeset_status" class="ss-inline-status" role="status" aria-live="polite"></span>
+                                    </header>
+                                    <textarea id="ss_pending_changeset_json" class="ss-code-editor" rows="18" spellcheck="false" aria-label="本地待处理 ChangeSet JSON"></textarea>
+                                    <div class="ss-pending-actions">
+                                        <button id="ss_adopt_pending_changeset" class="ss-button ss-button-primary" type="button">
+                                            <img class="ss-icon" src="/icons/check.svg" alt=""><span>采纳 ChangeSet</span>
+                                        </button>
+                                        <button id="ss_save_pending_changeset" class="ss-icon-button" type="button" title="保存本地草稿" aria-label="保存本地草稿">
+                                            <img class="ss-icon" src="/icons/save.svg" alt="">
+                                        </button>
+                                        <button id="ss_revert_pending_changeset" class="ss-icon-button" type="button" title="还原本地草稿" aria-label="还原本地草稿">
+                                            <img class="ss-icon" src="/icons/rotate-ccw.svg" alt="">
+                                        </button>
+                                        <button id="ss_clear_pending_changeset" class="ss-icon-button" type="button" title="清空本地草稿" aria-label="清空本地草稿">
+                                            <img class="ss-icon" src="/icons/eraser.svg" alt="">
+                                        </button>
+                                        <button id="ss_copy_pending_changeset" class="ss-icon-button" type="button" title="复制 ChangeSet" aria-label="复制 ChangeSet">
+                                            <img class="ss-icon" src="/icons/copy.svg" alt="">
+                                        </button>
+                                    </div>
+                                </section>
+                            </div>
+                        </section>
+
+                        <details class="ss-story-state">
+                            <summary><span>权威 Story State JSON</span><span>只读</span></summary>
+                            <textarea id="ss_story_state_json" class="ss-code-editor" rows="18" spellcheck="false" readonly aria-label="只读权威 Story State JSON"></textarea>
+                        </details>
+
+                        <details class="ss-legacy-continuity">
+                            <summary>旧版连续性条目</summary>
+                            <div id="ss_ledger_list" class="ss-ledger-list"></div>
+                            <div id="ss_ledger_empty" class="ss-inline-empty" hidden>暂无旧版条目</div>
+                        </details>
+                    </div>
+                </section>
+
+                <section id="ss_copilot_view" class="ss-view ss-copilot-view" role="tabpanel" aria-labelledby="ss_copilot_tab" hidden>
+                    <div class="ss-section-heading ss-copilot-heading">
+                        <div>
+                            <span class="ss-eyebrow">PLANNING COPILOT</span>
+                            <h1>策划工作台</h1>
+                        </div>
+                        <span id="ss_copilot_status" class="ss-inline-status" role="status" aria-live="polite"></span>
+                    </div>
+
+                    <div class="ss-copilot-workspace">
+                        <aside class="ss-copilot-controls" aria-label="策划上下文">
+                            <section class="ss-copilot-control-section" aria-labelledby="ss_copilot_context_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">CONTEXT</span>
+                                        <h2 id="ss_copilot_context_title">手选上下文</h2>
+                                    </div>
+                                    <button id="ss_copilot_preview" class="ss-button" type="button">
+                                        <img class="ss-icon" src="/icons/search-check.svg" alt=""><span>预览</span>
+                                    </button>
+                                </header>
+                                <label><span>当前作品</span><input id="ss_copilot_project_context" class="ss-control" type="text" readonly></label>
+                                <label><span>锚点章节</span><select id="ss_copilot_anchor_chapter" class="ss-control"></select></label>
+                                <div class="ss-copilot-selection-grid">
+                                    <fieldset>
+                                        <legend>卷</legend>
+                                        <div id="ss_copilot_volume_options" class="ss-copilot-check-list"></div>
+                                    </fieldset>
+                                    <fieldset>
+                                        <legend>章节</legend>
+                                        <div id="ss_copilot_chapter_options" class="ss-copilot-check-list"></div>
+                                    </fieldset>
+                                    <fieldset>
+                                        <legend>人物</legend>
+                                        <div id="ss_copilot_entity_options" class="ss-copilot-check-list"></div>
+                                    </fieldset>
+                                    <fieldset>
+                                        <legend>世界书</legend>
+                                        <div id="ss_copilot_lorebook_options" class="ss-copilot-check-list"></div>
+                                    </fieldset>
+                                </div>
+                                <div class="ss-copilot-retrieval-row">
+                                    <label><span>检索词</span><input id="ss_copilot_retrieval_query" class="ss-control" type="search" maxlength="20000" autocomplete="off"></label>
+                                    <label><span>命中数</span><input id="ss_copilot_retrieval_limit" class="ss-control" type="number" min="1" max="100" step="1" value="20"></label>
+                                </div>
+                                <div class="ss-copilot-preview-meta">
+                                    <span id="ss_copilot_context_digest" class="ss-muted-copy"></span>
+                                    <div class="ss-copilot-evidence-actions">
+                                        <button id="ss_copilot_evidence_defaults" class="ss-button" type="button">默认</button>
+                                        <button id="ss_copilot_evidence_all" class="ss-button" type="button">全选</button>
+                                        <button id="ss_copilot_evidence_none" class="ss-button" type="button">清空</button>
+                                    </div>
+                                </div>
+                                <div id="ss_copilot_evidence_list" class="ss-copilot-evidence-list" aria-label="上下文证据"></div>
+                            </section>
+
+                            <section class="ss-copilot-control-section" aria-labelledby="ss_copilot_profile_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">PROFILE & MODEL</span>
+                                        <h2 id="ss_copilot_profile_title">独立配置</h2>
+                                    </div>
+                                    <button id="ss_copilot_test_model" class="ss-icon-button" type="button" title="测试策划模型" aria-label="测试策划模型">
+                                        <img class="ss-icon" src="/icons/activity.svg" alt="">
+                                    </button>
+                                </header>
+                                <label><span>策划 Profile</span><select id="ss_copilot_profile" class="ss-control"></select></label>
+                                <div id="ss_copilot_model_mode" class="ss-segmented ss-copilot-model-mode" role="group" aria-label="策划模型来源">
+                                    <button type="button" data-copilot-model-mode="inherit" aria-pressed="true">继承写作模型</button>
+                                    <button type="button" data-copilot-model-mode="override" aria-pressed="false">指定模型</button>
+                                </div>
+                                <label><span>模型</span><input id="ss_copilot_model" class="ss-control" type="text" maxlength="256" autocomplete="off"></label>
+                                <div class="ss-copilot-inline-actions">
+                                    <span id="ss_copilot_model_status" class="ss-muted-copy"></span>
+                                    <button id="ss_copilot_save_model" class="ss-button" type="button">
+                                        <img class="ss-icon" src="/icons/save.svg" alt=""><span>保存模型</span>
+                                    </button>
+                                </div>
+                            </section>
+
+                            <section class="ss-copilot-control-section" aria-labelledby="ss_copilot_task_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">BRIEF</span>
+                                        <h2 id="ss_copilot_task_title">策划任务</h2>
+                                    </div>
+                                </header>
+                                <label><span>任务</span><textarea id="ss_copilot_instruction" rows="6" maxlength="50000"></textarea></label>
+                                <div class="ss-copilot-option-row">
+                                    <span>互斥方向</span>
+                                    <div class="ss-copilot-stepper" role="group" aria-label="互斥方向数量">
+                                        <button id="ss_copilot_option_decrease" class="ss-icon-button" type="button" title="减少方向" aria-label="减少方向">
+                                            <img class="ss-icon" src="/icons/minus.svg" alt="">
+                                        </button>
+                                        <input id="ss_copilot_option_count" class="ss-control" type="number" min="3" max="6" step="1" value="3" aria-label="互斥方向数量">
+                                        <button id="ss_copilot_option_increase" class="ss-icon-button" type="button" title="增加方向" aria-label="增加方向">
+                                            <img class="ss-icon" src="/icons/plus.svg" alt="">
+                                        </button>
+                                    </div>
+                                </div>
+                                <button id="ss_copilot_create_session" class="ss-button ss-button-primary" type="button">
+                                    <img class="ss-icon" src="/icons/sparkles.svg" alt=""><span>创建策划会话</span>
+                                </button>
+                            </section>
+                        </aside>
+
+                        <div class="ss-copilot-results">
+                            <div class="ss-copilot-session-toolbar">
+                                <label><span>会话</span><select id="ss_copilot_session" class="ss-control"></select></label>
+                                <div class="ss-copilot-session-actions">
+                                    <button id="ss_copilot_refresh" class="ss-icon-button" type="button" title="刷新会话" aria-label="刷新会话">
+                                        <img class="ss-icon" src="/icons/refresh-cw.svg" alt="">
+                                    </button>
+                                    <button id="ss_copilot_generate" class="ss-button ss-button-primary" type="button">
+                                        <img class="ss-icon" src="/icons/play.svg" alt=""><span>生成方案</span>
+                                    </button>
+                                    <button id="ss_copilot_cancel" class="ss-button ss-button-danger-quiet" type="button">
+                                        <img class="ss-icon" src="/icons/square.svg" alt=""><span>取消</span>
+                                    </button>
+                                    <button id="ss_copilot_retry" class="ss-button" type="button">
+                                        <img class="ss-icon" src="/icons/rotate-cw.svg" alt=""><span>重试</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <section class="ss-copilot-result-section ss-copilot-session-summary" aria-labelledby="ss_copilot_session_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">SESSION</span>
+                                        <h2 id="ss_copilot_session_title">会话状态</h2>
+                                    </div>
+                                    <span id="ss_copilot_session_status" class="ss-inline-status"></span>
+                                </header>
+                                <div id="ss_copilot_session_meta" class="ss-copilot-meta"></div>
+                                <pre id="ss_copilot_stream" class="ss-copilot-stream" aria-live="polite"></pre>
+                            </section>
+
+                            <section class="ss-copilot-result-section" aria-labelledby="ss_copilot_directions_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">DIRECTIONS</span>
+                                        <h2 id="ss_copilot_directions_title">互斥方向对照</h2>
+                                    </div>
+                                    <div class="ss-copilot-artifact-actions">
+                                        <button id="ss_copilot_copy" class="ss-icon-button" type="button" title="复制策划包" aria-label="复制策划包">
+                                            <img class="ss-icon" src="/icons/copy.svg" alt="">
+                                        </button>
+                                        <button id="ss_copilot_export" class="ss-icon-button" type="button" title="导出策划包" aria-label="导出策划包">
+                                            <img class="ss-icon" src="/icons/download.svg" alt="">
+                                        </button>
+                                    </div>
+                                </header>
+                                <div id="ss_copilot_directions" class="ss-copilot-directions"></div>
+                            </section>
+
+                            <section class="ss-copilot-result-section" aria-labelledby="ss_copilot_setting_diffs_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">SETTING DIFF</span>
+                                        <h2 id="ss_copilot_setting_diffs_title">设定提案</h2>
+                                    </div>
+                                </header>
+                                <div id="ss_copilot_setting_diffs" class="ss-copilot-diff-list"></div>
+                            </section>
+
+                            <section class="ss-copilot-result-section" aria-labelledby="ss_copilot_lorebook_diffs_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">LOREBOOK DIFF</span>
+                                        <h2 id="ss_copilot_lorebook_diffs_title">世界书提案</h2>
+                                    </div>
+                                </header>
+                                <div id="ss_copilot_lorebook_diffs" class="ss-copilot-diff-list"></div>
+                            </section>
+
+                            <section id="ss_copilot_error" class="ss-workflow-error" aria-labelledby="ss_copilot_error_title" hidden>
+                                <div>
+                                    <strong id="ss_copilot_error_title">策划错误</strong>
+                                    <p id="ss_copilot_error_message"></p>
+                                </div>
+                            </section>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="ss_workflow_view" class="ss-view ss-workflow-view" role="tabpanel" aria-labelledby="ss_workflow_tab" hidden>
+                    <div class="ss-section-heading ss-workflow-heading">
+                        <div>
+                            <span class="ss-eyebrow">CHAPTER WORKFLOW</span>
+                            <h1>章节流程</h1>
+                        </div>
+                        <span id="ss_workflow_status" class="ss-inline-status" role="status" aria-live="polite"></span>
+                    </div>
+
+                    <div class="ss-workflow-workspace">
+                        <div class="ss-workflow-toolbar">
+                            <label><span>流程定义</span><select id="ss_workflow_definition" class="ss-control" aria-label="流程定义"></select></label>
+                            <label><span>运行记录</span><select id="ss_workflow_run" class="ss-control" aria-label="运行记录"></select></label>
+                            <div class="ss-workflow-toolbar-actions">
+                                <button id="ss_workflow_new_run" class="ss-button ss-button-primary" type="button">
+                                    <img class="ss-icon" src="/icons/plus.svg" alt=""><span>新建运行</span>
+                                </button>
+                                <button id="ss_workflow_refresh" class="ss-icon-button" type="button" title="刷新流程" aria-label="刷新流程">
+                                    <img class="ss-icon" src="/icons/refresh-cw.svg" alt="">
+                                </button>
+                            </div>
+                        </div>
+
+                        <div id="ss_workflow_track" class="ss-workflow-track" role="list" aria-label="流程步骤"></div>
+
+                        <div class="ss-workflow-detail-grid">
+                            <section class="ss-workflow-section ss-workflow-current" aria-labelledby="ss_workflow_current_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">CURRENT STEP</span>
+                                        <h2 id="ss_workflow_current_title">当前步骤</h2>
+                                    </div>
+                                    <span id="ss_workflow_current_status" class="ss-inline-status"></span>
+                                </header>
+                                <div id="ss_workflow_current_meta" class="ss-workflow-current-meta"></div>
+                                <div class="ss-workflow-actions">
+                                    <button id="ss_workflow_execute" class="ss-button ss-button-primary" type="button">
+                                        <img class="ss-icon" src="/icons/play.svg" alt=""><span>执行当前步骤</span>
+                                    </button>
+                                    <button id="ss_workflow_approve" class="ss-button" type="button">
+                                        <img class="ss-icon" src="/icons/check.svg" alt=""><span>审批</span>
+                                    </button>
+                                    <button id="ss_workflow_apply" class="ss-button" type="button">
+                                        <img class="ss-icon" src="/icons/corner-down-right.svg" alt=""><span>应用</span>
+                                    </button>
+                                    <button id="ss_workflow_cancel" class="ss-button ss-button-danger-quiet" type="button">
+                                        <img class="ss-icon" src="/icons/square.svg" alt=""><span>取消运行</span>
+                                    </button>
+                                </div>
+                            </section>
+
+                            <section class="ss-workflow-section" aria-labelledby="ss_workflow_evidence_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">EVIDENCE</span>
+                                        <h2 id="ss_workflow_evidence_title">诊断证据</h2>
+                                    </div>
+                                </header>
+                                <div id="ss_workflow_evidence" class="ss-workflow-evidence"></div>
+                            </section>
+
+                            <section class="ss-workflow-section ss-workflow-artifact-section" aria-labelledby="ss_workflow_artifact_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">CANDIDATE ARTIFACT</span>
+                                        <h2 id="ss_workflow_artifact_title">候选 Artifact JSON</h2>
+                                    </div>
+                                    <select id="ss_workflow_artifact_select" class="ss-control" aria-label="候选 Artifact"></select>
+                                </header>
+                                <div id="ss_workflow_artifact_summary" class="ss-workflow-artifact-summary"></div>
+                                <pre id="ss_workflow_artifact_json" class="ss-workflow-json"></pre>
+                            </section>
+
+                            <section class="ss-workflow-section" aria-labelledby="ss_workflow_authority_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">AUTHORITY</span>
+                                        <h2 id="ss_workflow_authority_title">权威版本</h2>
+                                    </div>
+                                </header>
+                                <dl id="ss_workflow_authority" class="ss-workflow-authority"></dl>
+                            </section>
+                        </div>
+
+                        <section id="ss_workflow_error" class="ss-workflow-error" aria-labelledby="ss_workflow_error_title" hidden>
+                            <div>
+                                <strong id="ss_workflow_error_title">流程错误</strong>
+                                <p id="ss_workflow_error_message"></p>
+                            </div>
+                            <button id="ss_workflow_retry" class="ss-button" type="button">
+                                <img class="ss-icon" src="/icons/rotate-cw.svg" alt=""><span>重试</span>
+                            </button>
+                        </section>
+                    </div>
+                </section>
+
+                <section id="ss_quality_view" class="ss-view ss-quality-view" role="tabpanel" aria-labelledby="ss_quality_tab" hidden>
+                    <div class="ss-section-heading ss-quality-heading">
+                        <div>
+                            <span class="ss-eyebrow">QUALITY SYSTEM</span>
+                            <h1>质量工作台</h1>
+                        </div>
+                        <div class="ss-quality-heading-actions">
+                            <span id="ss_quality_status" class="ss-inline-status" role="status" aria-live="polite"></span>
+                            <button id="ss_quality_refresh" class="ss-icon-button" type="button" title="刷新质量工作台" aria-label="刷新质量工作台">
+                                <img class="ss-icon" src="/icons/refresh-cw.svg" alt="">
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="ss_quality_no_project" class="ss-quality-empty" hidden>
+                        <span class="ss-empty-glyph" aria-hidden="true">质</span>
+                        <h2>先选择一个作品</h2>
+                        <p>内置配方复制、当前章检查与持久质量报告需要绑定作品。</p>
+                    </div>
+
+                    <div id="ss_quality_workspace" class="ss-quality-workspace">
+                        <section class="ss-quality-section ss-quality-recipes" aria-labelledby="ss_quality_recipes_title">
+                            <header>
+                                <div>
+                                    <span class="ss-eyebrow">BUILT-IN RECIPES</span>
+                                    <h2 id="ss_quality_recipes_title">内置网文配方</h2>
+                                </div>
+                                <span id="ss_quality_builtin_revision" class="ss-quality-revision"></span>
+                            </header>
+                            <p class="ss-muted-copy">8 套不可覆盖的写作 Profile，可叠加 5 种类型约束后复制为当前项目的可编辑资源。</p>
+                            <div id="ss_quality_profile_catalog" class="ss-quality-profile-catalog" role="listbox" aria-label="内置写作 Profile"></div>
+                            <div class="ss-quality-recipe-detail">
+                                <div id="ss_quality_profile_detail" class="ss-quality-profile-detail"></div>
+                                <div>
+                                    <span class="ss-field-label">类型 overlays</span>
+                                    <div id="ss_quality_overlay_catalog" class="ss-quality-overlay-catalog" aria-label="类型 overlays"></div>
+                                </div>
+                            </div>
+                            <div class="ss-quality-copy-grid">
+                                <label><span>副本名称</span><input id="ss_quality_copy_name" class="ss-control" type="text" maxlength="160" autocomplete="off" placeholder="留空则使用默认副本名"></label>
+                                <label><span>叠加类型</span><select id="ss_quality_copy_overlay" class="ss-control"></select></label>
+                                <button id="ss_quality_copy_profile" class="ss-button ss-button-primary" type="button">
+                                    <img class="ss-icon" src="/icons/copy.svg" alt=""><span>复制到当前项目</span>
+                                </button>
+                            </div>
+                            <span id="ss_quality_copy_status" class="ss-inline-status" role="status" aria-live="polite"></span>
+                        </section>
+
+                        <section class="ss-quality-section ss-quality-chapter" aria-labelledby="ss_quality_chapter_title">
+                            <header>
+                                <div>
+                                    <span class="ss-eyebrow">CHAPTER QUALITY</span>
+                                    <h2 id="ss_quality_chapter_title">当前章检查</h2>
+                                    <span id="ss_quality_chapter_label" class="ss-muted-copy"></span>
+                                </div>
+                                <div class="ss-quality-actions">
+                                    <button id="ss_quality_preview" class="ss-button ss-button-primary" type="button">
+                                        <img class="ss-icon" src="/icons/search-check.svg" alt=""><span>预览当前稿</span>
+                                    </button>
+                                    <button id="ss_quality_save_report" class="ss-button" type="button">
+                                        <img class="ss-icon" src="/icons/save.svg" alt=""><span>保存报告</span>
+                                    </button>
+                                </div>
+                            </header>
+                            <div id="ss_quality_chapter_summary" class="ss-quality-summary"></div>
+                            <div id="ss_quality_issue_list" class="ss-quality-issue-list" role="list" aria-label="质量问题"></div>
+                            <div id="ss_quality_issue_empty" class="ss-inline-empty">运行预览或打开历史报告后显示问题</div>
+
+                            <div class="ss-quality-history">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">PERSISTED REPORTS</span>
+                                        <h3>持久质量报告</h3>
+                                    </div>
+                                    <button id="ss_quality_refresh_reports" class="ss-icon-button" type="button" title="刷新报告列表" aria-label="刷新报告列表">
+                                        <img class="ss-icon" src="/icons/refresh-cw.svg" alt="">
+                                    </button>
+                                </header>
+                                <div class="ss-quality-history-picker">
+                                    <label><span>报告</span><select id="ss_quality_report_select" class="ss-control" aria-label="持久质量报告"></select></label>
+                                    <button id="ss_quality_open_report" class="ss-button" type="button">
+                                        <img class="ss-icon" src="/icons/file-search.svg" alt=""><span>打开报告</span>
+                                    </button>
+                                </div>
+                                <div id="ss_quality_report_meta" class="ss-quality-meta"></div>
+                            </div>
+                        </section>
+
+                        <section class="ss-quality-section ss-quality-regression" aria-labelledby="ss_quality_regression_title">
+                            <header>
+                                <div>
+                                    <span class="ss-eyebrow">FIXED REGRESSION</span>
+                                    <h2 id="ss_quality_regression_title">固定回归门禁</h2>
+                                </div>
+                                <button id="ss_quality_run_regression" class="ss-button ss-button-primary" type="button">
+                                    <img class="ss-icon" src="/icons/play.svg" alt=""><span>运行固定集</span>
+                                </button>
+                            </header>
+                            <div id="ss_quality_suite_meta" class="ss-quality-meta"></div>
+                            <div class="ss-quality-regression-grid">
+                                <section class="ss-quality-metric-panel" aria-labelledby="ss_quality_baseline_title">
+                                    <span class="ss-eyebrow">BASELINE</span>
+                                    <h3 id="ss_quality_baseline_title">固化基线</h3>
+                                    <div id="ss_quality_baseline_summary" class="ss-quality-summary"></div>
+                                </section>
+                                <section class="ss-quality-metric-panel" aria-labelledby="ss_quality_run_title">
+                                    <span class="ss-eyebrow">CANDIDATE RUN</span>
+                                    <h3 id="ss_quality_run_title">候选运行</h3>
+                                    <div class="ss-quality-run-picker">
+                                        <label><span>运行记录</span><select id="ss_quality_run_select" class="ss-control" aria-label="质量回归运行记录"></select></label>
+                                        <button id="ss_quality_open_run" class="ss-button" type="button">打开</button>
+                                    </div>
+                                    <div id="ss_quality_run_summary" class="ss-quality-summary"></div>
+                                    <button id="ss_quality_compare_baseline" class="ss-button" type="button">
+                                        <img class="ss-icon" src="/icons/git-compare.svg" alt=""><span>与固化基线比较</span>
+                                    </button>
+                                </section>
+                            </div>
+                            <section class="ss-quality-gate-panel" aria-labelledby="ss_quality_gate_title">
+                                <header>
+                                    <div>
+                                        <span class="ss-eyebrow">GATE RESULT</span>
+                                        <h3 id="ss_quality_gate_title">门禁结果</h3>
+                                    </div>
+                                    <span id="ss_quality_gate_status" class="ss-inline-status"></span>
+                                </header>
+                                <div id="ss_quality_gate_list" class="ss-quality-gate-list"></div>
+                                <div id="ss_quality_gate_empty" class="ss-inline-empty">选择一次运行并与固化基线比较</div>
+                            </section>
+                        </section>
+
+                        <section id="ss_quality_error" class="ss-workflow-error ss-quality-error" aria-labelledby="ss_quality_error_title" hidden>
+                            <div>
+                                <strong id="ss_quality_error_title">质量工作台错误</strong>
+                                <p id="ss_quality_error_message"></p>
+                            </div>
+                            <button id="ss_quality_retry" class="ss-button" type="button">
+                                <img class="ss-icon" src="/icons/rotate-cw.svg" alt=""><span>重试</span>
+                            </button>
+                        </section>
+                    </div>
+                </section>
+
+                <section id="ss_resources_view" class="ss-view ss-resources-view" role="tabpanel" aria-labelledby="ss_resources_tab" hidden>
+                    <div class="ss-section-heading">
+                        <div>
+                            <span class="ss-eyebrow">RESOURCES</span>
+                            <h1>创作资源</h1>
+                        </div>
+                        <button id="ss_import_resource" class="ss-button ss-button-primary" type="button">
+                            <img class="ss-icon" src="/icons/upload.svg" alt=""><span>导入资源</span>
+                        </button>
+                    </div>
+                    <div id="ss_resource_status" class="ss-inline-status" role="status" aria-live="polite"></div>
+                    <div class="ss-resource-workspace">
+                        <div id="ss_resource_list" class="ss-resource-list"></div>
+                        <section id="ss_resource_detail" class="ss-resource-detail" aria-labelledby="ss_resource_detail_name">
+                            <div id="ss_resource_detail_empty" class="ss-inline-empty">选择资源查看详情</div>
+                            <div id="ss_resource_detail_content" hidden>
+                                <header class="ss-subsection-heading">
+                                    <div><span id="ss_resource_detail_type" class="ss-eyebrow"></span><h2 id="ss_resource_detail_name">资源详情</h2></div>
+                                    <button id="ss_delete_resource" class="ss-icon-button" type="button" title="删除资源" aria-label="删除资源">
+                                        <img class="ss-icon" src="/icons/trash-2.svg" alt="">
+                                    </button>
+                                </header>
+                                <label id="ss_resource_instruction_row" class="ss-resource-instruction" hidden>
+                                    <input id="ss_resource_instruction_enabled" type="checkbox"><span>启用角色指令</span>
+                                </label>
+                                <section id="ss_resource_compatibility" class="ss-resource-compatibility" aria-labelledby="ss_resource_compatibility_title" hidden>
+                                    <div>
+                                        <span class="ss-eyebrow">IMPORT COMPATIBILITY</span>
+                                        <h3 id="ss_resource_compatibility_title">导入兼容性</h3>
+                                    </div>
+                                    <div id="ss_resource_compatibility_meta" class="ss-context-tags"></div>
+                                    <div id="ss_resource_compatibility_warnings" class="ss-profile-report"></div>
+                                </section>
+                                <section id="ss_profile_editor" class="ss-profile-editor" aria-label="Prompt Profile V2 编辑器" hidden>
+                                    <div class="ss-profile-toolbar">
+                                        <div>
+                                            <div id="ss_profile_meta" class="ss-context-tags"></div>
+                                            <span id="ss_profile_status" class="ss-inline-status" role="status" aria-live="polite"></span>
+                                        </div>
+                                        <div class="ss-profile-actions">
+                                            <button id="ss_profile_revert" class="ss-icon-button" type="button" title="还原 Profile" aria-label="还原 Profile">
+                                                <img class="ss-icon" src="/icons/rotate-ccw.svg" alt="">
+                                            </button>
+                                            <button id="ss_profile_save" class="ss-button ss-button-primary" type="button">
+                                                <img class="ss-icon" src="/icons/save.svg" alt=""><span>保存 Profile</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="ss-profile-tabs" role="tablist" aria-label="Profile 编辑区">
+                                        <button class="is-active" type="button" role="tab" data-profile-tab="overview" aria-selected="true" aria-controls="ss_profile_panel_overview">概览</button>
+                                        <button type="button" role="tab" data-profile-tab="modules" aria-selected="false" aria-controls="ss_profile_panel_modules" tabindex="-1">模块</button>
+                                        <button type="button" role="tab" data-profile-tab="variables" aria-selected="false" aria-controls="ss_profile_panel_variables" tabindex="-1">变量</button>
+                                        <button type="button" role="tab" data-profile-tab="tasks" aria-selected="false" aria-controls="ss_profile_panel_tasks" tabindex="-1">任务参数</button>
+                                        <button type="button" role="tab" data-profile-tab="compatibility" aria-selected="false" aria-controls="ss_profile_panel_compatibility" tabindex="-1">兼容性</button>
+                                        <button type="button" role="tab" data-profile-tab="preview" aria-selected="false" aria-controls="ss_profile_panel_preview" tabindex="-1">编译预览</button>
+                                    </div>
+                                    <section id="ss_profile_panel_overview" class="ss-profile-panel" role="tabpanel" data-profile-panel="overview">
+                                        <div id="ss_profile_counts" class="ss-profile-counts"></div>
+                                        <label><span>名称</span><input id="ss_profile_name" class="ss-control" type="text" maxlength="160"></label>
+                                        <div class="ss-profile-budget-fields">
+                                            <label><span>Profile Token 预算</span><input id="ss_profile_token_budget" class="ss-control" type="number" min="0" max="2000000" step="1" placeholder="不限"></label>
+                                            <label><span>Profile 字符预算</span><input id="ss_profile_character_budget" class="ss-control" type="number" min="0" max="2000000" step="1" placeholder="不限"></label>
+                                        </div>
+                                        <label><span>生成参数</span><textarea id="ss_profile_generation" class="ss-code-editor" rows="10" spellcheck="false"></textarea></label>
+                                    </section>
+                                    <section id="ss_profile_panel_modules" class="ss-profile-panel" role="tabpanel" data-profile-panel="modules" hidden>
+                                        <label><span>模块</span><textarea id="ss_profile_modules" class="ss-code-editor" rows="22" spellcheck="false"></textarea></label>
+                                        <label><span>显式顺序</span><textarea id="ss_profile_order" class="ss-code-editor" rows="8" spellcheck="false"></textarea></label>
+                                    </section>
+                                    <section id="ss_profile_panel_variables" class="ss-profile-panel" role="tabpanel" data-profile-panel="variables" hidden>
+                                        <label><span>变量</span><textarea id="ss_profile_variables" class="ss-code-editor" rows="20" spellcheck="false"></textarea></label>
+                                        <label><span>变量选择</span><textarea id="ss_profile_variable_values" class="ss-code-editor" rows="8" spellcheck="false"></textarea></label>
+                                    </section>
+                                    <section id="ss_profile_panel_tasks" class="ss-profile-panel" role="tabpanel" data-profile-panel="tasks" hidden>
+                                        <label><span>命名生成策略</span><textarea id="ss_profile_generation_policies" class="ss-code-editor" rows="12" spellcheck="false"></textarea></label>
+                                        <label><span>任务策略</span><textarea id="ss_profile_task_policies" class="ss-code-editor" rows="20" spellcheck="false"></textarea></label>
+                                    </section>
+                                    <section id="ss_profile_panel_compatibility" class="ss-profile-panel" role="tabpanel" data-profile-panel="compatibility" hidden>
+                                        <div id="ss_profile_compatibility_meta" class="ss-context-tags"></div>
+                                        <div id="ss_profile_compatibility_warnings" class="ss-profile-report"></div>
+                                    </section>
+                                    <section id="ss_profile_panel_preview" class="ss-profile-panel" role="tabpanel" data-profile-panel="preview" hidden>
+                                        <div class="ss-profile-preview-controls">
+                                            <label><span>任务</span><select id="ss_profile_preview_task" class="ss-control"><option value="">默认</option></select></label>
+                                            <label><span>Token 预算</span><input id="ss_profile_preview_tokens" class="ss-control" type="number" min="0" step="1" placeholder="Profile 默认"></label>
+                                            <label><span>字符预算</span><input id="ss_profile_preview_characters" class="ss-control" type="number" min="0" step="1" placeholder="Profile 默认"></label>
+                                        </div>
+                                        <label><span>变量覆盖</span><textarea id="ss_profile_preview_variables" class="ss-code-editor" rows="6" spellcheck="false">{}</textarea></label>
+                                        <button id="ss_profile_compile" class="ss-button" type="button">
+                                            <img class="ss-icon" src="/icons/play.svg" alt=""><span>编译</span>
+                                        </button>
+                                        <div id="ss_profile_compile_status" class="ss-inline-status" role="status" aria-live="polite"></div>
+                                        <div id="ss_profile_compile_issues" class="ss-context-tags"></div>
+                                        <div id="ss_profile_compile_modules" class="ss-profile-module-list"></div>
+                                        <details><summary>Messages</summary><pre id="ss_profile_compile_messages"></pre></details>
+                                        <details><summary>Generation</summary><pre id="ss_profile_compile_generation"></pre></details>
+                                    </section>
+                                </section>
+                                <section id="ss_profile_legacy" class="ss-profile-legacy" aria-label="Legacy Prompt Profile" hidden>
+                                    <div id="ss_profile_legacy_meta" class="ss-context-tags"></div>
+                                    <div id="ss_profile_legacy_warnings" class="ss-profile-report"></div>
+                                </section>
+                                <details class="ss-resource-raw">
+                                    <summary>原始 JSON</summary>
+                                    <pre id="ss_resource_json"></pre>
+                                </details>
+                            </div>
+                        </section>
+                    </div>
+                </section>
+            </main>
+
+            <aside id="ss_inspector" class="ss-inspector" aria-label="章节检查器">
+                <div class="ss-inspector-tabs" role="tablist" aria-label="检查器">
+                    <button id="ss_card_tab" class="ss-tab is-active" type="button" role="tab" data-ss-inspector="card" aria-label="章纲" aria-controls="ss_card_panel" aria-selected="true">章纲</button>
+                    <button id="ss_assistant_tab" class="ss-tab" type="button" role="tab" data-ss-inspector="assistant" aria-label="AI 候选" aria-controls="ss_assistant_panel" aria-selected="false" tabindex="-1">AI 候选</button>
+                    <button id="ss_versions_tab" class="ss-tab" type="button" role="tab" data-ss-inspector="versions" aria-label="章节版本" aria-controls="ss_versions_panel" aria-selected="false" tabindex="-1">版本</button>
+                </div>
+
+                <section id="ss_card_panel" class="ss-inspector-panel" role="tabpanel" aria-labelledby="ss_card_tab">
+                    <div class="ss-card-context">
+                        <span id="ss_card_breadcrumb"></span>
+                        <span id="ss_plan_review_status" class="ss-plan-review-status" role="status" hidden>章纲待复核</span>
+                    </div>
+                    <label><span>本章摘要</span><textarea data-card-field="summary" rows="4"></textarea></label>
+                    <label><span>本章目标</span><textarea data-card-field="goal" rows="3"></textarea></label>
+                    <label><span>核心冲突</span><textarea data-card-field="conflict" rows="3"></textarea></label>
+                    <label><span>价值转折</span><textarea data-card-field="turn" rows="3"></textarea></label>
+                    <label><span>章尾钩子</span><textarea data-card-field="hook" rows="3"></textarea></label>
+                    <div class="ss-field-row ss-field-row-compact">
+                        <label><span>视角</span><input class="ss-control" data-card-field="pov" type="text"></label>
+                        <label><span>时间</span><input class="ss-control" data-card-field="time" type="text"></label>
+                    </div>
+                    <label><span>地点</span><input class="ss-control" data-card-field="location" type="text"></label>
+                    <label><span>必须兑现</span><textarea data-card-field="required" rows="3"></textarea></label>
+                    <label><span>必须避免</span><textarea data-card-field="avoid" rows="3"></textarea></label>
+                    <label><span>作者备注</span><textarea id="ss_chapter_notes" rows="5"></textarea></label>
+                </section>
+
+                <section id="ss_assistant_panel" class="ss-inspector-panel" role="tabpanel" aria-labelledby="ss_assistant_tab" hidden>
+                    <div class="ss-segmented" role="group" aria-label="生成类型">
+                        <button class="is-active" type="button" data-ss-ai="plan" aria-label="生成章纲" aria-pressed="true">章纲</button>
+                        <button type="button" data-ss-ai="draft" aria-label="生成正文" aria-pressed="false">正文</button>
+                        <button type="button" data-ss-ai="review" aria-label="生成审校意见" aria-pressed="false">审校</button>
+                        <button type="button" data-ss-ai="continuity" aria-label="提取连续性设定" aria-pressed="false">设定</button>
+                    </div>
+                    <div class="ss-quick-tools" role="group" aria-label="选区 AI 工具">
+                        <button type="button" data-ss-ai="polish" aria-label="润色正文选区" aria-pressed="false">润色</button>
+                        <button type="button" data-ss-ai="rewrite" aria-label="重写正文选区" aria-pressed="false">重写</button>
+                        <button type="button" data-ss-ai="expand" aria-label="扩写正文选区" aria-pressed="false">扩写</button>
+                        <button type="button" data-ss-ai="brainstorm" aria-label="围绕正文选区构思" aria-pressed="false">构思</button>
+                    </div>
+                    <div class="ss-generation-history-row">
+                        <label class="ss-generation-history"><span>候选历史</span><select id="ss_generation_history" class="ss-control" aria-label="选择候选历史"></select></label>
+                        <div class="ss-generation-tools" aria-label="候选工具">
+                            <button id="ss_generation_preview" class="ss-icon-button" type="button" aria-label="预览生成上下文" title="预览生成上下文">
+                                <img class="ss-icon" src="/icons/eye.svg" alt="">
+                            </button>
+                            <button id="ss_retrieval_preview" class="ss-icon-button" type="button" aria-label="预览可追溯检索" title="预览可追溯检索">
+                                <img class="ss-icon" src="/icons/search.svg" alt="">
+                            </button>
+                            <button id="ss_generation_regenerate" class="ss-icon-button" type="button" aria-label="重新生成当前候选" title="重新生成">
+                                <img class="ss-icon" src="/icons/rotate-cw.svg" alt="">
+                            </button>
+                            <button id="ss_generation_continue" class="ss-icon-button" type="button" aria-label="继续生成当前正文候选" title="继续生成">
+                                <img class="ss-icon" src="/icons/corner-down-right.svg" alt="">
+                            </button>
+                        </div>
+                    </div>
+                    <label class="ss-generation-instruction"><span>本次要求</span><textarea id="ss_generation_instruction" rows="2" maxlength="50000" placeholder="可选"></textarea></label>
+                    <details id="ss_context_overrides" class="ss-context-overrides">
+                        <summary><span>手工上下文</span><span id="ss_context_override_count" class="ss-context-override-count">0</span></summary>
+                        <div class="ss-context-override-groups">
+                            <section aria-labelledby="ss_context_entity_title">
+                                <strong id="ss_context_entity_title">实体</strong>
+                                <div id="ss_context_entity_overrides" class="ss-context-override-list"></div>
+                            </section>
+                            <section aria-labelledby="ss_context_promise_title">
+                                <strong id="ss_context_promise_title">待兑现事项</strong>
+                                <div id="ss_context_promise_overrides" class="ss-context-override-list"></div>
+                            </section>
+                            <section aria-labelledby="ss_context_retrieval_title">
+                                <div class="ss-context-override-heading">
+                                    <strong id="ss_context_retrieval_title">检索片段</strong>
+                                    <button id="ss_clear_retrieval_overrides" class="ss-icon-button" type="button" title="清空检索覆盖" aria-label="清空检索覆盖">
+                                        <img class="ss-icon" src="/icons/eraser.svg" alt="">
+                                    </button>
+                                </div>
+                                <div id="ss_context_retrieval_overrides" class="ss-context-override-list"></div>
+                                <label class="ss-retrieval-rerank">
+                                    <input id="ss_retrieval_rerank" type="checkbox">
+                                    <span><strong>模型重排</strong><small>使用当前模型重排已通过安全过滤的命中；失败时自动回退本地排序</small></span>
+                                </label>
+                            </section>
+                        </div>
+                    </details>
+                    <button id="ss_generate" class="ss-button ss-button-primary ss-generate" type="button" aria-label="生成 AI 候选">
+                        <img class="ss-icon" src="/icons/sparkles.svg" alt="">
+                        <span>生成候选</span>
+                    </button>
+                    <div id="ss_generation_status" class="ss-generation-status" role="status" aria-live="polite"></div>
+                    <section id="ss_context_preview" class="ss-context-preview" aria-labelledby="ss_context_preview_title" hidden>
+                        <header>
+                            <strong id="ss_context_preview_title">上下文预览</strong>
+                            <button id="ss_close_context_preview" class="ss-icon-button" type="button" aria-label="关闭上下文预览" title="关闭">
+                                <img class="ss-icon" src="/icons/x.svg" alt="">
+                            </button>
+                        </header>
+                        <div id="ss_context_metrics" class="ss-context-metrics"></div>
+                        <div class="ss-context-diagnostic-row"><span>当前卷纲</span><div id="ss_context_volume" class="ss-context-tags"></div></div>
+                        <div class="ss-context-diagnostic-row"><span>激活世界书</span><div id="ss_context_lore" class="ss-context-tags"></div></div>
+                        <div class="ss-context-diagnostic-row"><span>未注入世界书</span><div id="ss_context_lore_skipped" class="ss-context-tags"></div></div>
+                        <div class="ss-context-diagnostic-row"><span>Prompt Profile</span><div id="ss_context_profile" class="ss-context-tags"></div></div>
+                        <div class="ss-context-diagnostic-row"><span>Profile 模块</span><div id="ss_context_profile_modules" class="ss-context-tags"></div></div>
+                        <div class="ss-context-diagnostic-row"><span>连续性预检</span><div id="ss_context_continuity_preflight" class="ss-context-tags"></div></div>
+                        <div class="ss-context-diagnostic-row"><span>检索命中</span><div id="ss_context_retrieval" class="ss-context-tags ss-context-retrieval"></div></div>
+                        <div class="ss-context-diagnostic-row"><span>截断与预算</span><div id="ss_context_truncation" class="ss-context-tags"></div></div>
+                        <details>
+                            <summary>Messages</summary>
+                            <pre id="ss_context_messages"></pre>
+                        </details>
+                        <details>
+                            <summary>System Prompt</summary>
+                            <pre id="ss_context_system"></pre>
+                        </details>
+                        <details>
+                            <summary>User Prompt</summary>
+                            <pre id="ss_context_user"></pre>
+                        </details>
+                    </section>
+                    <div class="ss-candidate-heading">
+                        <span id="ss_candidate_label">候选稿</span>
+                        <time id="ss_candidate_time"></time>
+                    </div>
+                    <textarea id="ss_candidate" class="ss-candidate" rows="14" placeholder="尚无候选稿"></textarea>
+                    <div id="ss_candidate_actions" class="ss-candidate-actions"></div>
+                    <section id="ss_distillation" class="ss-distillation" aria-labelledby="ss_distillation_title" hidden>
+                        <header><strong id="ss_distillation_title">ChangeSet</strong><span id="ss_distillation_status"></span></header>
+                        <p id="ss_distillation_summary"></p>
+                        <div id="ss_distillation_counts" class="ss-distillation-counts"></div>
+                        <details id="ss_distillation_details" hidden>
+                            <summary>JSON</summary>
+                            <pre id="ss_distillation_json"></pre>
+                        </details>
+                    </section>
+                    <label class="ss-review-record"><span>审校记录</span><textarea id="ss_review_record" rows="8" placeholder="暂无审校记录"></textarea></label>
+                </section>
+
+                <section id="ss_versions_panel" class="ss-inspector-panel ss-versions-panel" role="tabpanel" aria-labelledby="ss_versions_tab" hidden>
+                    <header class="ss-versions-heading">
+                        <div>
+                            <span class="ss-eyebrow">HISTORY</span>
+                            <strong>章节版本</strong>
+                        </div>
+                        <button id="ss_refresh_versions" class="ss-icon-button" type="button" aria-label="刷新章节版本" title="刷新版本">
+                            <img class="ss-icon" src="/icons/refresh-cw.svg" alt="">
+                        </button>
+                    </header>
+                    <div id="ss_versions_status" class="ss-inline-status" role="status" aria-live="polite"></div>
+                    <div id="ss_versions_list" class="ss-version-list" role="group" aria-label="章节版本"></div>
+                    <div id="ss_versions_empty" class="ss-inline-empty">暂无版本</div>
+                    <section id="ss_version_detail" class="ss-version-detail" aria-labelledby="ss_version_detail_title">
+                        <div id="ss_version_detail_empty" class="ss-inline-empty">选择版本查看快照</div>
+                        <div id="ss_version_detail_content" hidden>
+                            <header class="ss-version-detail-heading">
+                                <div>
+                                    <span id="ss_version_detail_source" class="ss-eyebrow"></span>
+                                    <h3 id="ss_version_detail_title">版本快照</h3>
+                                </div>
+                                <time id="ss_version_detail_time"></time>
+                            </header>
+                            <div id="ss_version_metrics" class="ss-version-metrics"></div>
+                            <div class="ss-version-diff-heading">
+                                <strong>与当前章节相比</strong>
+                            </div>
+                            <div id="ss_version_diff" class="ss-version-diff"></div>
+                            <details class="ss-version-content-preview">
+                                <summary>查看版本正文</summary>
+                                <pre id="ss_version_content"></pre>
+                            </details>
+                            <button id="ss_restore_version" class="ss-button ss-button-primary ss-restore-version" type="button">
+                                <img class="ss-icon" src="/icons/archive-restore.svg" alt="">
+                                <span>恢复此版本</span>
+                            </button>
+                        </div>
+                    </section>
+                </section>
+            </aside>
+        </div>
+
+        <button id="ss_drawer_scrim" class="ss-drawer-scrim" type="button" aria-label="关闭侧栏" title="关闭侧栏" hidden></button>
+        <input id="ss_import_file" type="file" accept="application/json,.json" hidden>
+        <input id="ss_resource_import_file" type="file" accept="application/json,image/png,.json,.png" hidden>
+        <div id="ss_toast" class="ss-toast" role="status" aria-live="polite" hidden></div>
+    </section>
+
+    <button id="ss_provider_scrim" class="ss-provider-scrim" type="button" aria-label="关闭模型设置" title="关闭模型设置" hidden></button>
+    <aside id="ss_provider_drawer" class="ss-provider-drawer" role="dialog" aria-modal="true" aria-labelledby="ss_provider_title" hidden>
+        <header class="ss-provider-heading">
+            <div>
+                <span class="ss-eyebrow">MODEL</span>
+                <h2 id="ss_provider_title">模型设置</h2>
+            </div>
+            <button id="ss_close_provider" class="ss-icon-button" type="button" title="关闭模型设置" aria-label="关闭模型设置">
+                <img class="ss-icon" src="/icons/x.svg" alt="">
+            </button>
+        </header>
+        <form id="ss_provider_form" class="ss-provider-form">
+            <p class="ss-provider-copy">直接连接所选模型协议。密钥只保存在本地服务端，留空不会覆盖同一接口来源与协议下的现有密钥。</p>
+            <label><span>协议</span>
+                <select id="ss_provider_protocol" class="ss-control" name="protocol">
+                    <option value="openai-chat">OpenAI Chat Completions</option>
+                    <option value="anthropic-messages">Anthropic Messages</option>
+                    <option value="google-generate-content">Google Gemini</option>
+                    <option value="openai-completions">OpenAI Text Completions</option>
+                    <option value="ollama-generate">Ollama Generate</option>
+                    <option value="llamacpp-completion">llama.cpp Completion</option>
+                </select>
+            </label>
+            <label><span>接口地址</span><input id="ss_provider_base_url" class="ss-control" name="baseUrl" type="url" placeholder="http://127.0.0.1:11434/v1" required autocomplete="url"></label>
+            <label><span>模型</span><input id="ss_provider_model" class="ss-control" name="model" type="text" placeholder="模型 ID" required autocomplete="off"></label>
+            <label>
+                <span class="ss-label-action"><span>API 密钥</span><span id="ss_provider_key_state" class="ss-muted-copy">未保存</span></span>
+                <span class="ss-secret-field">
+                    <input id="ss_provider_api_key" class="ss-control" name="apiKey" type="password" placeholder="留空以保留现有密钥" autocomplete="new-password">
+                    <button id="ss_clear_provider_key" class="ss-icon-button" type="button" title="清除已保存密钥" aria-label="清除已保存密钥">
+                        <img class="ss-icon" src="/icons/trash-2.svg" alt="">
+                    </button>
+                </span>
+            </label>
+            <div class="ss-field-row ss-provider-numbers">
+                <label><span>温度</span><input id="ss_provider_temperature" class="ss-control" name="temperature" type="number" min="0" max="2" step="0.05" inputmode="decimal"></label>
+                <label><span>Top P</span><input id="ss_provider_top_p" class="ss-control" name="topP" type="number" min="0" max="1" step="0.01" inputmode="decimal"></label>
+                <label><span>Top K</span><input id="ss_provider_top_k" class="ss-control" name="topK" type="number" min="0" max="100000" step="1" inputmode="numeric"></label>
+                <label><span>上下文窗口</span><input id="ss_provider_context_tokens" class="ss-control" name="contextTokens" type="number" min="2048" max="2000000" step="1" inputmode="numeric"></label>
+                <label><span>单次最大输出</span><input id="ss_provider_max_tokens" class="ss-control" name="maxTokens" type="number" min="256" max="200000" step="1" inputmode="numeric"></label>
+            </div>
+            <label><span>停止词</span><textarea id="ss_provider_stop" name="stop" rows="3" placeholder="每行一个，最多 16 个"></textarea></label>
+            <label class="ss-toggle-row" for="ss_provider_json_schema">
+                <span><strong>JSON Schema</strong><small>章纲与设定提取使用结构化输出</small></span>
+                <input id="ss_provider_json_schema" name="jsonSchema" type="checkbox">
+                <span class="ss-toggle" aria-hidden="true"></span>
+            </label>
+            <div class="ss-provider-actions">
+                <button id="ss_test_provider" class="ss-button" type="button" aria-label="测试模型连接">
+                    <img class="ss-icon" src="/icons/activity.svg" alt="">
+                    <span>测试连接</span>
+                </button>
+                <button id="ss_save_provider" class="ss-button ss-button-primary" type="submit" aria-label="保存模型设置">
+                    <img class="ss-icon" src="/icons/save.svg" alt="">
+                    <span>保存设置</span>
+                </button>
+            </div>
+            <output id="ss_provider_status" class="ss-provider-status" aria-live="polite"></output>
+        </form>
+    </aside>
+
+    <script type="module" src="/app.js"></script>
+</body>
+</html>

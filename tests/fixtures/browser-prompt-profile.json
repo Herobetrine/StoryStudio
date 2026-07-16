@@ -1,0 +1,13 @@
+{
+  "name": "因果网文",
+  "temperature": 0.65,
+  "top_p": 0.9,
+  "openai_max_context": 32768,
+  "prompts": [
+    {
+      "identifier": "main",
+      "role": "system",
+      "content": "写作必须呈现人物选择、直接结果和后续代价。"
+    }
+  ]
+}

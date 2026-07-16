@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "id": "story-studio-public-webnovel-v1",
+  "name": "StoryStudio 非用户私稿固定质量回归集",
+  "revision": 2,
+  "cases": [
+    {
+      "id": "progression-clean",
+      "title": "升级玄幻：资源兑现与卷目标推进",
+      "genreOverlay": "progression-fantasy",
+      "content": "石门合拢前，顾临把最后三枚灵符压进阵眼。守关傀儡挥拳砸落，他没有硬接，而是借震力让裂纹沿阵盘扩散。阵盘碎开的瞬间，藏在底座里的灵石滚到脚边。顾临只取走属于胜者的一枚，其余两枚推给受伤的同伴。执事看完留影，当场把三人的名字写进入内门名册。那块来历不明的残图却在灵气中浮出第二条山路，终点正指向宗门禁地。",
+      "chapterCard": {
+        "required": "夺得灵石；进入内门名册；残图；第二条山路",
+        "avoid": "越级斩杀元婴；直接揭晓残图主人"
+      },
+      "volumeGoal": "进入内门",
+      "promises": [
+        {
+          "id": "map-origin",
+          "title": "残图来历",
+          "summary": "残图的主人和终点尚未揭晓",
+          "status": "open"
+        }
+      ],
+      "expect": {
+        "requiredRuleIds": [],
+        "forbiddenRuleIds": [
+          "chapter-required-missed",
+          "chapter-avoid-hit",
+          "volume-goal-missed",
+          "promise-missed",
+          "pov-knowledge-leak"
+        ],
+        "maxBlockers": 0,
+        "maxMajors": 0
+      }
+    },
+    {
+      "id": "urban-protected-knowledge",
+      "title": "都市异能：限知事实泄漏",
+      "genreOverlay": "urban-power",
+      "content": "许砚第一次走进档案室，值班员只让他查看公开卷宗。他翻到失火记录时，立刻知道院长用伪造监控掩盖了实验事故。窗外警笛逼近，他把那一页折进袖口。",
+      "protectedFacts": [
+        {
+          "id": "forged-camera",
+          "summary": "院长用伪造监控掩盖了实验事故"
+        }
+      ],
+      "expect": {
+        "requiredRuleIds": ["pov-knowledge-leak"],
+        "forbiddenRuleIds": [],
+        "maxBlockers": 1,
+        "maxMajors": 0
+      }
+    },
+    {
+      "id": "suspense-repetition",
+      "title": "悬疑探秘：同构起笔与重复意象",
+      "genreOverlay": "suspense-mystery",
+      "content": "她抬起灯照向井壁，黑水像墨汁贴着石缝，第一枚指纹停在半人高处。\n\n她抬起灯照向铁梯，黑水像墨汁贴着石缝，第二枚指纹却朝向井底。\n\n她抬起灯照向锁链，黑水像墨汁贴着石缝，锁扣内侧刻着昨天的日期。",
+      "expect": {
+        "requiredRuleIds": ["repeated-sentence-opening", "repeated-imagery"],
+        "forbiddenRuleIds": ["summary-ending", "premature-next-chapter"],
+        "maxBlockers": 0,
+        "maxMajors": 0
+      }
+    },
+    {
+      "id": "historical-time-regression",
+      "title": "历史权谋：无转场时间倒退",
+      "genreOverlay": "historical-strategy",
+      "content": "深夜，驿卒把密信送进东宫。太子验过火漆，只召来掌管北门的校尉。\n\n清晨，校尉仍在宴席上向众人敬酒，仿佛密信尚未抵京。",
+      "expect": {
+        "requiredRuleIds": ["time-jump"],
+        "forbiddenRuleIds": [],
+        "maxBlockers": 0,
+        "maxMajors": 1
+      }
+    },
+    {
+      "id": "romance-boundary-violation",
+      "title": "情感关系：命中禁止项",
+      "genreOverlay": "romance-emotion",
+      "content": "周棠把辞职信放在桌上，问沈屿是否愿意解释那通电话。沈屿明明握着完整录音，却故意保持沉默，让她误会自己已经订婚。",
+      "chapterCard": {
+        "required": "解释那通电话",
+        "avoid": "订婚误会"
+      },
+      "expect": {
+        "requiredRuleIds": ["chapter-avoid-hit"],
+        "forbiddenRuleIds": [],
+        "maxBlockers": 1,
+        "maxMajors": 0
+      }
+    },
+    {
+      "id": "retrospective-structure-loop",
+      "title": "结构节奏：回顾开篇与描写对白循环",
+      "genreOverlay": "suspense-mystery",
+      "content": "回想起旧宅的冬夜，墙纸泛着灰白，走廊尽头没有脚步声。\n\n“你昨晚来过这里吗？”\n\n窗帘垂在地板上，门框边积着一层薄尘。\n\n壁炉已经熄灭，铜架上只剩冷掉的蜡痕。\n\n“我从没有进过这间屋。”\n\n天花板布满水渍，角落里的挂钟停在三点。",
+      "expect": {
+        "requiredRuleIds": [
+          "retrospective-opening",
+          "isomorphic-paragraphs",
+          "description-dialogue-loop"
+        ],
+        "forbiddenRuleIds": [],
+        "maxBlockers": 0,
+        "maxMajors": 1
+      }
+    },
+    {
+      "id": "summary-ending-violation",
+      "title": "章尾边界：总结式收束",
+      "genreOverlay": "progression-fantasy",
+      "content": "顾临把断剑插回鞘中，确认石门后的追兵暂时没有跟上。他将新得到的阵图摊在火光边，三处缺口恰好对应山腹里的岔道。他终于明白，这一切终究只是命运的安排。",
+      "expect": {
+        "requiredRuleIds": ["summary-ending"],
+        "forbiddenRuleIds": ["premature-next-chapter"],
+        "maxBlockers": 0,
+        "maxMajors": 1
+      }
+    },
+    {
+      "id": "next-chapter-preview",
+      "title": "章尾边界：显式预告后续章节",
+      "genreOverlay": "urban-power",
+      "content": "许砚关掉档案室的灯，把失火卷宗藏进外套。电梯停在这一层，门缝里先伸进一只戴黑手套的手。下一章，他将查清院长留下的监控。",
+      "expect": {
+        "requiredRuleIds": ["premature-next-chapter"],
+        "forbiddenRuleIds": ["summary-ending"],
+        "maxBlockers": 0,
+        "maxMajors": 1
+      }
+    },
+    {
+      "id": "appellation-drift",
+      "title": "人物连续性：同章称呼漂移",
+      "genreOverlay": "historical-strategy",
+      "content": "沈砚接过密信，没有立刻拆开。少卿绕到屏风后，确认廊下无人，才让值夜校尉封住北门。",
+      "entities": [
+        {
+          "id": "shen-yan",
+          "name": "沈砚",
+          "aliases": ["少卿"]
+        }
+      ],
+      "expect": {
+        "requiredRuleIds": ["appellation-drift"],
+        "forbiddenRuleIds": [],
+        "maxBlockers": 0,
+        "maxMajors": 0
+      }
+    },
+    {
+      "id": "plan-and-promise-debt",
+      "title": "计划兑现：章纲、卷目标与伏笔均未推进",
+      "genreOverlay": "progression-fantasy",
+      "content": "顾临在偏殿清点药材，把破损的木匣重新钉好。雨声压住院外的脚步，他决定今夜留在房中休息。",
+      "chapterCard": {
+        "required": "夺回宗门令牌",
+        "avoid": ""
+      },
+      "volumeGoal": "进入内门",
+      "promises": [
+        {
+          "id": "sealed-letter",
+          "title": "封印书信",
+          "summary": "书信中的血印来源尚未查明",
+          "status": "open"
+        }
+      ],
+      "expect": {
+        "requiredRuleIds": [
+          "chapter-required-missed",
+          "volume-goal-missed",
+          "promise-missed"
+        ],
+        "forbiddenRuleIds": [],
+        "maxBlockers": 0,
+        "maxMajors": 1
+      }
+    }
+  ]
+}

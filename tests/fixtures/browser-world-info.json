@@ -1,0 +1,17 @@
+{
+  "name": "赤门规则",
+  "entries": {
+    "1": {
+      "uid": 1,
+      "key": ["赤门"],
+      "keysecondary": ["日落"],
+      "comment": "赤门开启条件",
+      "content": "赤门只在日落前开启；越过门槛者必须回答守将一个问题。",
+      "constant": false,
+      "selective": false,
+      "order": 100,
+      "position": 0,
+      "disable": false
+    }
+  }
+}
