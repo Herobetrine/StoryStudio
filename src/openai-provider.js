@@ -763,7 +763,9 @@ function createAbortContext(timeoutMs, externalSignal) {
         timedOut = true;
         controller.abort(new DOMException('The operation timed out.', 'TimeoutError'));
     }, timeoutMs);
-    timeout.unref?.();
+    // Keep the deadline referenced until cleanup. A custom fetch or Web Stream
+    // can wait on a Promise without owning another event-loop handle; unref()
+    // would let Node 20 end the test or process before the timeout can abort it.
 
     const abortFromExternal = () => controller.abort(externalAbortError(externalSignal));
     if (externalSignal?.aborted) {

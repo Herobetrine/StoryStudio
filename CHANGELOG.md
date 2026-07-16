@@ -41,6 +41,7 @@ StoryStudio 的重要变化记录在此文件中。
 
 - Copilot 流程取消后再次选择同一方向会生成新的交接命令；同一次网络不确定重试仍复用原命令，保留幂等恢复。
 - 发布包中的 `mock-provider` 入口迁移到 `scripts/`，发布合同会逐项验证所有直接 Node.js 脚本入口均随包分发。
+- Provider 截止计时器在 Node.js 20 下保持有效直到请求清理，避免无额外事件循环句柄的请求提前结束；Mock Provider 中断测试改为等待真实计时器清理事件，CI Actions 同步升级到 Node 24 运行时版本。
 
 ### Security
 

@@ -406,7 +406,9 @@ describe('browser mock provider fixture', () => {
         const originalClearTimeout = globalThis.clearTimeout;
         const streamTimers = new Set();
         let streamTimerScheduled;
+        let streamTimerCleared;
         const scheduled = new Promise(resolve => { streamTimerScheduled = resolve; });
+        const cleared = new Promise(resolve => { streamTimerCleared = resolve; });
         globalThis.setTimeout = (callback, delay, ...args) => {
             const timer = originalSetTimeout(() => {
                 streamTimers.delete(timer);
@@ -419,7 +421,7 @@ describe('browser mock provider fixture', () => {
             return timer;
         };
         globalThis.clearTimeout = timer => {
-            streamTimers.delete(timer);
+            if (streamTimers.delete(timer)) streamTimerCleared(timer);
             return originalClearTimeout(timer);
         };
 
@@ -443,8 +445,21 @@ describe('browser mock provider fixture', () => {
             const timer = await scheduled;
             assert.ok(streamTimers.has(timer));
             request.destroy();
-            await immediate();
-            await immediate();
+            let watchdog;
+            try {
+                const clearedTimer = await Promise.race([
+                    cleared,
+                    new Promise((_resolve, reject) => {
+                        watchdog = originalSetTimeout(
+                            () => reject(new Error('mock provider did not clear the delayed stream timer')),
+                            5_000,
+                        );
+                    }),
+                ]);
+                assert.equal(clearedTimer, timer);
+            } finally {
+                originalClearTimeout(watchdog);
+            }
             assert.equal(streamTimers.has(timer), false);
         } finally {
             request?.destroy();
