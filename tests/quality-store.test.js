@@ -110,6 +110,75 @@ describe('persistent quality records', () => {
         fs.rmSync(root, { recursive: true, force: true });
     });
 
+    test('rejects a missing quality root below an existing linked ancestor', t => {
+        const container = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-quality-linked-parent-'));
+        const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-quality-linked-target-'));
+        const linkedParent = path.join(container, 'linked-parent');
+        t.after(() => {
+            try {
+                fs.unlinkSync(linkedParent);
+            } catch {
+                // Link creation may have failed before cleanup.
+            }
+            fs.rmSync(container, { recursive: true, force: true });
+            fs.rmSync(externalRoot, { recursive: true, force: true });
+        });
+        fs.symlinkSync(
+            externalRoot,
+            linkedParent,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+
+        assert.throws(
+            () => new QualityStore(path.join(linkedParent, 'quality')),
+            error => error?.status === 500 && error?.code === 'unsafe_quality_path',
+        );
+        assert.deepEqual(fs.readdirSync(externalRoot), []);
+    });
+
+    test('rejects reads and writes after the quality storage root is replaced by a junction', () => {
+        const originalRoot = `${root}-original`;
+        const externalRoot = `${root}-external`;
+        fs.mkdirSync(externalRoot);
+        fs.renameSync(root, originalRoot);
+        fs.symlinkSync(
+            externalRoot,
+            root,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        try {
+            assert.throws(
+                () => store.listChapterReports('project-one', 'chapter-one'),
+                error => error?.status === 500 && error?.code === 'unsafe_quality_path',
+            );
+            assert.throws(
+                () => store.saveChapterReport(chapterValue()),
+                error => error?.status === 500 && error?.code === 'unsafe_quality_path',
+            );
+            assert.deepEqual(fs.readdirSync(externalRoot), []);
+        } finally {
+            fs.unlinkSync(root);
+            fs.renameSync(originalRoot, root);
+            fs.rmSync(externalRoot, { recursive: true, force: true });
+        }
+    });
+
+    test('rejects a new real directory installed at the quality root path', t => {
+        const container = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-quality-root-identity-'));
+        const guardedRoot = path.join(container, 'quality');
+        const originalRoot = path.join(container, 'quality-original');
+        t.after(() => fs.rmSync(container, { recursive: true, force: true }));
+        const guardedStore = new QualityStore(guardedRoot);
+        fs.renameSync(guardedRoot, originalRoot);
+        fs.mkdirSync(guardedRoot);
+
+        assert.throws(
+            () => guardedStore.listChapterReports('project-one', 'chapter-one'),
+            error => error?.status === 500 && error?.code === 'unsafe_quality_path',
+        );
+        assert.deepEqual(fs.readdirSync(guardedRoot), []);
+    });
+
     test('persists chapter reports, regression runs, and comparisons across a store restart', () => {
         const chapter = store.saveChapterReport(chapterValue());
         const report = regressionReport();

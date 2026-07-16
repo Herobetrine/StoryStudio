@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
+import { createStoragePathGuard } from './api-error.js';
+
 const GENERATION_SCHEMA_VERSION = 1;
 const VALID_ID = /^[a-zA-Z0-9_-]{1,64}$/;
 const GENERATION_KINDS = new Set([
@@ -277,32 +279,47 @@ function summary(record) {
 
 export class GenerationStore {
     constructor(rootDirectory) {
-        this.rootDirectory = path.resolve(rootDirectory);
-        fs.mkdirSync(this.rootDirectory, { recursive: true });
+        this.pathGuard = createStoragePathGuard(rootDirectory, {
+            label: 'Generation storage',
+            createError: (message, details) => (
+                new GenerationStoreError(message, 500, 'unsafe_generation_path', details)
+            ),
+        });
+        this.rootDirectory = this.pathGuard.rootDirectory;
+    }
+
+    storagePath(...segments) {
+        return this.pathGuard.resolvePath(...segments);
     }
 
     chapterDirectory(projectId, chapterId) {
-        return path.join(
-            this.rootDirectory,
+        return this.storagePath(
             assertId(projectId, 'projectId'),
             assertId(chapterId, 'chapterId'),
         );
     }
 
     generationPath(projectId, chapterId, generationId) {
-        return path.join(this.chapterDirectory(projectId, chapterId), `${assertId(generationId, 'generationId')}.json`);
+        return this.storagePath(
+            assertId(projectId, 'projectId'),
+            assertId(chapterId, 'chapterId'),
+            `${assertId(generationId, 'generationId')}.json`,
+        );
     }
 
     workflowDistillationDirectory(projectId, chapterId, generationId) {
-        return path.join(
-            this.chapterDirectory(projectId, chapterId),
+        return this.storagePath(
+            assertId(projectId, 'projectId'),
+            assertId(chapterId, 'chapterId'),
             `${assertId(generationId, 'generationId')}.distillations`,
         );
     }
 
     workflowDistillationPath(projectId, chapterId, generationId, slotDigest) {
-        return path.join(
-            this.workflowDistillationDirectory(projectId, chapterId, generationId),
+        return this.storagePath(
+            assertId(projectId, 'projectId'),
+            assertId(chapterId, 'chapterId'),
+            `${assertId(generationId, 'generationId')}.distillations`,
             `${assertSha256(slotDigest, 'slotDigest')}.json`,
         );
     }
@@ -310,6 +327,7 @@ export class GenerationStore {
     listGenerations(projectId, chapterId) {
         const directory = this.chapterDirectory(projectId, chapterId);
         if (!fs.existsSync(directory)) return [];
+        this.pathGuard.assertPath(directory);
         return fs.readdirSync(directory, { withFileTypes: true })
             .filter(entry => entry.isFile() && /^[a-zA-Z0-9_-]{1,64}\.json$/.test(entry.name))
             .map(entry => this.getGeneration(projectId, chapterId, entry.name.slice(0, -5)))
@@ -322,6 +340,7 @@ export class GenerationStore {
         if (!fs.existsSync(filePath)) {
             throw new GenerationStoreError('Generation not found.', 404, 'generation_not_found');
         }
+        this.pathGuard.assertPath(filePath);
         let value;
         try {
             value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -380,7 +399,7 @@ export class GenerationStore {
             adoptedAt: null,
         });
         const directory = this.chapterDirectory(projectId, chapterId);
-        fs.mkdirSync(directory, { recursive: true });
+        this.pathGuard.ensureDirectory(directory);
         this.write(record);
         return record;
     }
@@ -435,6 +454,7 @@ export class GenerationStore {
                 'workflow_distillation_not_found',
             );
         }
+        this.pathGuard.assertPath(filePath);
         let value;
         try {
             value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -476,8 +496,10 @@ export class GenerationStore {
             updatedAt: timestamp,
         });
         const filePath = this.workflowDistillationPath(projectId, chapterId, generationId, slotDigest);
-        fs.mkdirSync(path.dirname(filePath), { recursive: true });
-        writeFileAtomicSync(filePath, JSON.stringify(record, null, 2), { encoding: 'utf8' });
+        const serialized = JSON.stringify(record, null, 2);
+        this.pathGuard.ensureDirectory(path.dirname(filePath));
+        this.pathGuard.assertPath(filePath);
+        writeFileAtomicSync(filePath, serialized, { encoding: 'utf8' });
         return record;
     }
 
@@ -499,8 +521,10 @@ export class GenerationStore {
     write(record) {
         const normalized = validateRecord(record);
         const filePath = this.generationPath(normalized.projectId, normalized.chapterId, normalized.id);
-        fs.mkdirSync(path.dirname(filePath), { recursive: true });
-        writeFileAtomicSync(filePath, JSON.stringify(normalized, null, 2), { encoding: 'utf8' });
+        const serialized = JSON.stringify(normalized, null, 2);
+        this.pathGuard.ensureDirectory(path.dirname(filePath));
+        this.pathGuard.assertPath(filePath);
+        writeFileAtomicSync(filePath, serialized, { encoding: 'utf8' });
     }
 }
 

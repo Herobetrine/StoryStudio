@@ -41,6 +41,18 @@ jobs:
       - name: Run test suite
         run: npm test
 
+      - name: Install Playwright Chromium
+        if: matrix.os == 'ubuntu-latest'
+        run: npx playwright install --with-deps chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
+
+      - name: Run browser regression suite
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run test:browser
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ms-playwright
+
       - name: Run fixed quality gates
         run: npm run quality:check
 

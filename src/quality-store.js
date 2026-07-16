@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
-import { ApiError } from './api-error.js';
+import { ApiError, createStoragePathGuard } from './api-error.js';
 
 export const QUALITY_RECORD_SCHEMA_VERSION = 1;
 
@@ -300,45 +300,27 @@ export class QualityStore {
         if (typeof rootDirectory !== 'string' || !rootDirectory) {
             throw new TypeError('QualityStore requires a root directory.');
         }
-        this.rootDirectory = path.resolve(rootDirectory);
-        fs.mkdirSync(this.rootDirectory, { recursive: true });
-        const stat = fs.lstatSync(this.rootDirectory);
-        if (!stat.isDirectory() || stat.isSymbolicLink()) {
-            storageFailure('Quality storage root must be a real directory.', 'unsafe_quality_path');
-        }
+        this.pathGuard = createStoragePathGuard(rootDirectory, {
+            label: 'Quality storage',
+            createError: (message, details) => (
+                new ApiError(500, 'unsafe_quality_path', message, details)
+            ),
+        });
+        this.rootDirectory = this.pathGuard.rootDirectory;
         this.ensureDirectory(this.safePath('projects'));
         this.ensureDirectory(this.safePath('regression'));
     }
 
     safePath(...segments) {
-        const target = path.resolve(this.rootDirectory, ...segments);
-        if (target !== this.rootDirectory && !target.startsWith(`${this.rootDirectory}${path.sep}`)) {
-            storageFailure('Quality storage path escaped its root.', 'unsafe_quality_path');
-        }
-        this.assertNoLinks(target);
-        return target;
+        return this.pathGuard.resolvePath(...segments);
     }
 
     assertNoLinks(target) {
-        const relative = path.relative(this.rootDirectory, target);
-        let current = this.rootDirectory;
-        if (!relative) return;
-        for (const segment of relative.split(path.sep)) {
-            current = path.join(current, segment);
-            if (!fs.existsSync(current)) continue;
-            if (fs.lstatSync(current).isSymbolicLink()) {
-                storageFailure('Quality storage cannot traverse symbolic links or junctions.', 'unsafe_quality_path');
-            }
-        }
+        return this.pathGuard.assertPath(target);
     }
 
     ensureDirectory(directory) {
-        this.assertNoLinks(directory);
-        fs.mkdirSync(directory, { recursive: true });
-        this.assertNoLinks(directory);
-        if (!fs.lstatSync(directory).isDirectory()) {
-            storageFailure('Quality storage path is not a directory.', 'unsafe_quality_path');
-        }
+        return this.pathGuard.ensureDirectory(directory);
     }
 
     writeJson(filePath, value) {
@@ -353,7 +335,9 @@ export class QualityStore {
         if (Buffer.byteLength(json, 'utf8') > MAX_RECORD_BYTES) {
             bad('Quality record exceeds the storage limit.', 'quality_record_too_large', { maximum: MAX_RECORD_BYTES });
         }
+        this.assertNoLinks(filePath);
         writeFileAtomicSync(filePath, json, { encoding: 'utf8', mode: 0o600 });
+        this.assertNoLinks(filePath);
         try {
             fs.chmodSync(filePath, 0o600);
         } catch (error) {

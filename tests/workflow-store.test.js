@@ -19,6 +19,32 @@ describe('persistent declarative workflow state', () => {
         fs.rmSync(root, { recursive: true, force: true });
     });
 
+    test('rejects a missing workflow root below an existing linked ancestor', t => {
+        const container = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-workflow-linked-parent-'));
+        const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-workflow-linked-target-'));
+        const linkedParent = path.join(container, 'linked-parent');
+        t.after(() => {
+            try {
+                fs.unlinkSync(linkedParent);
+            } catch {
+                // Link creation may have failed before cleanup.
+            }
+            fs.rmSync(container, { recursive: true, force: true });
+            fs.rmSync(externalRoot, { recursive: true, force: true });
+        });
+        fs.symlinkSync(
+            externalRoot,
+            linkedParent,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+
+        assert.throws(
+            () => new WorkflowStore(path.join(linkedParent, 'workflow')),
+            error => error?.status === 500 && error?.code === 'unsafe_workflow_path',
+        );
+        assert.deepEqual(fs.readdirSync(externalRoot), []);
+    });
+
     function createRun(changes = {}) {
         return store.createRun({
             runId: 'run-one',
@@ -44,6 +70,49 @@ describe('persistent declarative workflow state', () => {
             ...changes,
         });
     }
+
+    test('rejects reads and writes after the workflow storage root is replaced by a junction', () => {
+        const originalRoot = `${root}-original`;
+        const externalRoot = `${root}-external`;
+        fs.mkdirSync(externalRoot);
+        fs.renameSync(root, originalRoot);
+        fs.symlinkSync(
+            externalRoot,
+            root,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        try {
+            assert.throws(
+                () => store.listRuns('project-one'),
+                error => error?.status === 500 && error?.code === 'unsafe_workflow_path',
+            );
+            assert.throws(
+                () => createRun(),
+                error => error?.status === 500 && error?.code === 'unsafe_workflow_path',
+            );
+            assert.deepEqual(fs.readdirSync(externalRoot), []);
+        } finally {
+            fs.unlinkSync(root);
+            fs.renameSync(originalRoot, root);
+            fs.rmSync(externalRoot, { recursive: true, force: true });
+        }
+    });
+
+    test('rejects a new real directory installed at the workflow root path', t => {
+        const container = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-workflow-root-identity-'));
+        const guardedRoot = path.join(container, 'workflows');
+        const originalRoot = path.join(container, 'workflows-original');
+        t.after(() => fs.rmSync(container, { recursive: true, force: true }));
+        const guardedStore = new WorkflowStore(guardedRoot);
+        fs.renameSync(guardedRoot, originalRoot);
+        fs.mkdirSync(guardedRoot);
+
+        assert.throws(
+            () => guardedStore.listRuns('project-one'),
+            error => error?.status === 500 && error?.code === 'unsafe_workflow_path',
+        );
+        assert.deepEqual(fs.readdirSync(guardedRoot), []);
+    });
 
     test('persists built-in definitions, runs, artifacts, and receipts below isolated directories', () => {
         const definition = store.getDefinition('builtin.chapter-cycle.v1');

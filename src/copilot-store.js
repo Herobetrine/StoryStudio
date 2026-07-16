@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
-import { ApiError } from './api-error.js';
+import { ApiError, createStoragePathGuard } from './api-error.js';
 
 export const COPILOT_SESSION_SCHEMA_VERSION = 1;
 export const COPILOT_SETTINGS_SCHEMA_VERSION = 1;
@@ -93,18 +93,6 @@ function readJson(filePath, missing = undefined) {
             file: path.basename(filePath),
         });
     }
-}
-
-function writeJson(filePath, value, maximum) {
-    const clone = cloneJson(value, 'Copilot record', maximum);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    writeFileAtomicSync(filePath, JSON.stringify(clone, null, 2), { encoding: 'utf8', mode: 0o600 });
-    try {
-        fs.chmodSync(filePath, 0o600);
-    } catch (error) {
-        if (process.platform !== 'win32') throw error;
-    }
-    return clone;
 }
 
 function validateAttempt(value, index) {
@@ -216,25 +204,59 @@ function sessionSummary(record) {
 
 export class CopilotStore {
     constructor(rootDirectory) {
-        this.rootDirectory = path.resolve(rootDirectory);
-        this.settingsPath = path.join(this.rootDirectory, 'settings.json');
-        fs.mkdirSync(this.rootDirectory, { recursive: true });
+        this.pathGuard = createStoragePathGuard(rootDirectory, {
+            label: 'Copilot storage',
+            createError: (message, details) => (
+                new ApiError(500, 'unsafe_copilot_path', message, details)
+            ),
+        });
+        this.rootDirectory = this.pathGuard.rootDirectory;
+        this.settingsPath = this.storagePath('settings.json');
+    }
+
+    storagePath(...segments) {
+        return this.pathGuard.resolvePath(...segments);
     }
 
     projectDirectory(projectId) {
-        return path.join(this.rootDirectory, 'projects', assertId(projectId, 'projectId'));
+        return this.storagePath('projects', assertId(projectId, 'projectId'));
     }
 
     sessionsDirectory(projectId) {
-        return path.join(this.projectDirectory(projectId), 'sessions');
+        return this.storagePath('projects', assertId(projectId, 'projectId'), 'sessions');
     }
 
     sessionPath(projectId, sessionId) {
-        return path.join(this.sessionsDirectory(projectId), `${assertId(sessionId, 'sessionId')}.json`);
+        return this.storagePath(
+            'projects',
+            assertId(projectId, 'projectId'),
+            'sessions',
+            `${assertId(sessionId, 'sessionId')}.json`,
+        );
+    }
+
+    readJson(filePath, missing = undefined) {
+        return readJson(this.pathGuard.assertPath(filePath), missing);
+    }
+
+    writeJson(filePath, value, maximum) {
+        const safePath = this.pathGuard.assertPath(filePath);
+        const clone = cloneJson(value, 'Copilot record', maximum);
+        const serialized = JSON.stringify(clone, null, 2);
+        this.pathGuard.ensureDirectory(path.dirname(safePath));
+        this.pathGuard.assertPath(safePath);
+        writeFileAtomicSync(safePath, serialized, { encoding: 'utf8', mode: 0o600 });
+        this.pathGuard.assertPath(safePath);
+        try {
+            fs.chmodSync(safePath, 0o600);
+        } catch (error) {
+            if (process.platform !== 'win32') throw error;
+        }
+        return clone;
     }
 
     getSettings() {
-        const stored = readJson(this.settingsPath, defaultSettings());
+        const stored = this.readJson(this.storagePath('settings.json'), defaultSettings());
         return validateSettings(stored);
     }
 
@@ -257,7 +279,7 @@ export class CopilotStore {
             || (value.modelMode === 'override' && !value.model.trim())) {
             throw new ApiError(400, 'invalid_copilot_settings', 'Copilot model selection is invalid.');
         }
-        return validateSettings(writeJson(this.settingsPath, {
+        return validateSettings(this.writeJson(this.storagePath('settings.json'), {
             schemaVersion: COPILOT_SETTINGS_SCHEMA_VERSION,
             revision: current.revision + 1,
             modelMode: value.modelMode,
@@ -272,13 +294,13 @@ export class CopilotStore {
         if (fs.existsSync(filePath)) {
             throw new ApiError(409, 'copilot_session_exists', 'Copilot session already exists.');
         }
-        writeJson(filePath, record, MAX_SESSION_BYTES);
+        this.writeJson(filePath, record, MAX_SESSION_BYTES);
         return record;
     }
 
     getSession(projectId, sessionId) {
         return validateCopilotSession(
-            readJson(this.sessionPath(projectId, sessionId)),
+            this.readJson(this.sessionPath(projectId, sessionId)),
             { projectId, id: sessionId },
         );
     }
@@ -297,7 +319,7 @@ export class CopilotStore {
             revision: current.revision + 1,
             updatedAt: new Date().toISOString(),
         }, { projectId, id: sessionId });
-        writeJson(this.sessionPath(projectId, sessionId), next, MAX_SESSION_BYTES);
+        this.writeJson(this.sessionPath(projectId, sessionId), next, MAX_SESSION_BYTES);
         return next;
     }
 
@@ -318,6 +340,7 @@ export class CopilotStore {
     listSessions(projectId) {
         const directory = this.sessionsDirectory(projectId);
         if (!fs.existsSync(directory)) return { sessions: [], corrupt: [] };
+        this.pathGuard.assertPath(directory);
         const sessions = [];
         const corrupt = [];
         for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {

@@ -22,6 +22,40 @@ afterEach(() => {
 });
 
 describe('project retrieval store', () => {
+    test('does not persist an index through a linked project directory', () => {
+        const storyStore = new StoryStudioStore(path.join(dataRoot, 'story'));
+        const retrievalRoot = path.join(dataRoot, 'retrieval');
+        const retrievalStore = new RetrievalStore(retrievalRoot, { storyStore });
+        const { project, chapter } = storyStore.createProject({ title: '检索越界检查' });
+        const externalRoot = path.join(dataRoot, 'external-retrieval-root');
+        const linkedRoot = path.join(dataRoot, 'linked-retrieval-root');
+        const externalProject = path.join(dataRoot, 'external-retrieval-project');
+        fs.mkdirSync(externalRoot);
+        fs.symlinkSync(externalRoot, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir');
+        assert.throws(
+            () => new RetrievalStore(linkedRoot, { storyStore }),
+            error => error?.code === 'unsafe_retrieval_path',
+        );
+        assert.deepEqual(fs.readdirSync(externalRoot), []);
+
+        fs.mkdirSync(externalProject, { recursive: true });
+        fs.symlinkSync(
+            externalProject,
+            path.join(retrievalRoot, project.id),
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+
+        assert.throws(
+            () => retrievalStore.preview(project.id, chapter.id, {
+                projectVersion: project.version,
+                chapterRevision: chapter.revision,
+                query: '越界',
+            }),
+            error => error?.code === 'unsafe_retrieval_path',
+        );
+        assert.deepEqual(fs.readdirSync(externalProject), []);
+    });
+
     test('persists a traceable index and refreshes only changed sources', () => {
         const storyStore = new StoryStudioStore(path.join(dataRoot, 'story'));
         const retrievalStore = new RetrievalStore(path.join(dataRoot, 'retrieval'), { storyStore });

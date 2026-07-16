@@ -130,6 +130,66 @@ afterEach(() => {
 });
 
 describe('provider configuration protocols', () => {
+    test('rejects linked or replaced provider storage roots before reading or writing secrets', () => {
+        const container = temporaryDirectory();
+        const linkedRoot = path.join(container, 'linked-provider-root');
+        const externalRoot = path.join(container, 'external-provider-root');
+        fs.mkdirSync(externalRoot);
+        fs.symlinkSync(
+            externalRoot,
+            linkedRoot,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        assert.throws(
+            () => new ProviderStore(linkedRoot),
+            error => error?.status === 500 && error?.code === 'unsafe_provider_path',
+        );
+        assert.deepEqual(fs.readdirSync(externalRoot), []);
+
+        const replaceableRoot = path.join(container, 'replaceable-provider-root');
+        const originalRoot = `${replaceableRoot}-original`;
+        const replacementRoot = path.join(container, 'replacement-provider-root');
+        const store = new ProviderStore(replaceableRoot);
+        assert.throws(
+            () => store.storagePath('..', 'escaped-provider.json'),
+            error => error?.status === 500 && error?.code === 'unsafe_provider_path',
+        );
+        fs.mkdirSync(replacementRoot);
+        const externalConfig = JSON.stringify({
+            protocol: 'openai-chat',
+            baseUrl: 'https://outside.example/v1',
+            model: 'outside-model',
+        });
+        const externalSecrets = JSON.stringify({
+            apiKey: 'OUTSIDE_PROVIDER_SECRET',
+            origin: 'https://outside.example',
+            protocol: 'openai-chat',
+        });
+        fs.writeFileSync(path.join(replacementRoot, 'provider.json'), externalConfig);
+        fs.writeFileSync(path.join(replacementRoot, 'secrets.json'), externalSecrets);
+        fs.renameSync(replaceableRoot, originalRoot);
+        fs.symlinkSync(
+            replacementRoot,
+            replaceableRoot,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        try {
+            assert.throws(
+                () => store.getResolved(),
+                error => error?.status === 500 && error?.code === 'unsafe_provider_path',
+            );
+            assert.throws(
+                () => store.update({ model: 'must-not-write-outside' }),
+                error => error?.status === 500 && error?.code === 'unsafe_provider_path',
+            );
+            assert.equal(fs.readFileSync(path.join(replacementRoot, 'provider.json'), 'utf8'), externalConfig);
+            assert.equal(fs.readFileSync(path.join(replacementRoot, 'secrets.json'), 'utf8'), externalSecrets);
+        } finally {
+            fs.unlinkSync(replaceableRoot);
+            fs.renameSync(originalRoot, replaceableRoot);
+        }
+    });
+
     test('publishes the supported protocol enum and defaults old settings to OpenAI chat', () => {
         assert.deepEqual(PROVIDER_PROTOCOLS, [
             'openai-chat',

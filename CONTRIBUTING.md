@@ -17,6 +17,8 @@ npm ci
 npm run check
 npm run docs:check
 npm test
+npm run test:browser:install
+npm run test:browser
 npm run quality:check
 ```
 
@@ -100,7 +102,7 @@ PORT=8125 STORY_STUDIO_DATA_ROOT=/tmp/story-studio-dev npm start
 | `src/openai-provider.js` | Provider 协议、超时、流式解析和传输边界 |
 | `public/` | 浏览器工作区和纯前端模型 |
 | `fixtures/` | 固定公开回归数据 |
-| `tests/` | Node.js 合同与回归测试 |
+| `tests/` | Node.js 合同测试与 Playwright Chromium 回归 |
 
 尽量把可测试逻辑写成纯函数。路由负责 HTTP 合同，Service 负责编排，Store 负责持久化和完整性。
 
@@ -112,10 +114,16 @@ PORT=8125 STORY_STUDIO_DATA_ROOT=/tmp/story-studio-dev npm start
 npm run check
 npm run docs:check
 npm test
+npm run test:browser
 npm run quality:check
 npm audit --omit=dev
 npm pack --dry-run --json
 ```
+
+首次运行浏览器回归前执行 `npm run test:browser:install`。测试服务器必须继续使用动态
+本机端口、独立临时数据目录和合成 Provider，不得读取作者正式数据。Ubuntu CI 会把
+Chromium 回归作为必过门禁；失败证据写入 `test-results/` 和 `playwright-report/`。
+浏览器测试只适用于完整源码仓库，npm 运行 tarball 不分发测试配置与开发依赖。
 
 验证重点：
 
@@ -124,7 +132,8 @@ npm pack --dry-run --json
 - Provider：六协议、参数映射、超时、取消、重定向、错误体、JSON、SSE/NDJSON；
 - Story State：引用、时间、POV、未来信息、替代链和 ChangeSet 原子性；
 - Workflow：Definition hash、V1 兼容、Artifact 血缘、receipt、取消、租约和恢复；
-- UI：纯状态投影、冲突、刷新恢复、桌面和移动视口；
+- UI：纯状态投影、冲突、刷新恢复、桌面和移动视口；涉及真实 DOM、多标签页、
+  `visibilitychange`、`pagehide` 或本地草稿租约时必须补 Playwright 回归；
 - 数据格式：旧版 fixture、升级、导出、重新导入和回滚证据。
 
 修改固定质量规则、Profile 或 regression suite 时：
@@ -187,6 +196,7 @@ npm pack --dry-run --json
 - [ ] `npm run check` 通过。
 - [ ] `npm run docs:check` 通过，发布文档没有包外相对链接或本机绝对路径。
 - [ ] `npm test` 通过。
+- [ ] 涉及浏览器状态、并发或生命周期时，`npm run test:browser` 通过。
 - [ ] `npm run quality:check` 通过。
 - [ ] `npm audit --omit=dev` 通过。
 - [ ] npm 打包清单只含白名单内容。

@@ -509,6 +509,244 @@ export function pendingChangeSetDraftStorageKey(projectId, chapterId) {
     return `story-studio:pending-changeset:${encodeURIComponent(projectId)}:${encodeURIComponent(chapterId)}`;
 }
 
+const WORKSPACE_RECOVERY_DRAFT_VERSION = 1;
+const SAFE_RECOVERY_PATH = /^(?!.*(?:^|\.)(?:__proto__|prototype|constructor)(?:\.|$))[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u;
+const SAFE_RECOVERY_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{15,127}$/u;
+
+function recoveryPaths(value, { maximum = 512, nested = true } = {}) {
+    if (!Array.isArray(value) || value.length > maximum) return [];
+    const paths = value
+        .filter(item => typeof item === 'string'
+            && item.length > 0
+            && item.length <= 512
+            && SAFE_RECOVERY_PATH.test(item)
+            && (nested || !item.includes('.')));
+    return [...new Set(paths)];
+}
+
+function recoveryObject(value) {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? structuredClone(value)
+        : {};
+}
+
+export function isWorkspaceRecoveryDraftIdentity(value) {
+    return typeof value === 'string' && SAFE_RECOVERY_ID.test(value);
+}
+
+export function workspaceRecoveryDraftStorageKey(projectId, chapterId, writerId = '') {
+    if (!projectId || !chapterId) return '';
+    const legacyKey = `story-studio:workspace-recovery:v1:${encodeURIComponent(projectId)}:${encodeURIComponent(chapterId)}`;
+    if (!writerId) return legacyKey;
+    if (!isWorkspaceRecoveryDraftIdentity(writerId)) return '';
+    return `${legacyKey}:${encodeURIComponent(writerId)}`;
+}
+
+export function workspaceRecoveryDraftStoragePrefix(projectId, chapterId) {
+    const legacyKey = workspaceRecoveryDraftStorageKey(projectId, chapterId);
+    return legacyKey ? `${legacyKey}:` : '';
+}
+
+export function compareAndRemoveWorkspaceRecoveryDraft(storage, storageKey, expectedRaw) {
+    if (!storage || !storageKey || typeof expectedRaw !== 'string') return false;
+    if (storage.getItem(storageKey) !== expectedRaw) return false;
+    storage.removeItem(storageKey);
+    return true;
+}
+
+export function workspaceRecoveryDraftCleanupDecision(record, removed, latestRecord) {
+    if (removed) return 'removed';
+    if (record?.storageKey
+        && typeof record.raw === 'string'
+        && latestRecord?.storageKey === record.storageKey
+        && typeof latestRecord.raw === 'string'
+        && latestRecord.raw !== record.raw) {
+        return 'updated';
+    }
+    return 'skip';
+}
+
+export function workspaceAuthorityMutationAllowsView(activeView, requestedView) {
+    return typeof activeView !== 'string' || activeView.length === 0 || activeView === requestedView;
+}
+
+export function scanWorkspaceRecoveryDrafts(storage, projectId, chapterId) {
+    const legacyKey = workspaceRecoveryDraftStorageKey(projectId, chapterId);
+    const storagePrefix = workspaceRecoveryDraftStoragePrefix(projectId, chapterId);
+    if (!storage || !legacyKey || !storagePrefix) return { records: [], invalid: [] };
+    const records = [];
+    const invalid = [];
+    for (let index = 0; index < storage.length; index += 1) {
+        const storageKey = storage.key(index);
+        if (storageKey !== legacyKey && !storageKey?.startsWith(storagePrefix)) continue;
+        const raw = storage.getItem(storageKey);
+        if (typeof raw !== 'string') continue;
+        let draft = null;
+        try {
+            draft = normalizeWorkspaceRecoveryDraft(JSON.parse(raw), { projectId, chapterId });
+        } catch {
+            // Invalid records are reported so the caller can remove them with compare-and-remove.
+        }
+        const expectedStorageKey = draft
+            ? workspaceRecoveryDraftStorageKey(projectId, chapterId, draft.writerId || '')
+            : '';
+        if (!draft || expectedStorageKey !== storageKey) {
+            invalid.push({ storageKey, raw });
+            continue;
+        }
+        records.push({ storageKey, raw, draft });
+    }
+    records.sort((left, right) => {
+        const leftTimestamp = Date.parse(left.draft.updatedAt) || 0;
+        const rightTimestamp = Date.parse(right.draft.updatedAt) || 0;
+        if (leftTimestamp !== rightTimestamp) return rightTimestamp - leftTimestamp;
+        return String(right.draft.draftId || '').localeCompare(String(left.draft.draftId || ''));
+    });
+    return { records, invalid };
+}
+
+export function selectWorkspaceRecoveryDraft(records, writerId) {
+    if (!Array.isArray(records) || records.length === 0) return null;
+    if (isWorkspaceRecoveryDraftIdentity(writerId)) {
+        const ownDraft = records.find(record => record?.draft?.writerId === writerId);
+        if (ownDraft) return ownDraft;
+    }
+    return records[0] || null;
+}
+
+export function workspaceRecoveryDraftRestorePolicy(draft, {
+    writerId = '',
+    exactAuthority = false,
+} = {}) {
+    return exactAuthority
+        && isWorkspaceRecoveryDraftIdentity(writerId)
+        && draft?.writerId === writerId
+        ? 'auto'
+        : 'confirm';
+}
+
+export function workspaceRecoveryWriterCollisionAction({
+    writerId = '',
+    instanceId = '',
+    established = false,
+    startedAt = 0,
+    remoteWriterId = '',
+    remoteInstanceId = '',
+    remoteEstablished = false,
+    remoteStartedAt = 0,
+} = {}) {
+    if (!isWorkspaceRecoveryDraftIdentity(writerId)
+        || !isWorkspaceRecoveryDraftIdentity(instanceId)
+        || !isWorkspaceRecoveryDraftIdentity(remoteWriterId)
+        || !isWorkspaceRecoveryDraftIdentity(remoteInstanceId)
+        || typeof established !== 'boolean'
+        || typeof remoteEstablished !== 'boolean'
+        || !Number.isSafeInteger(startedAt)
+        || startedAt < 0
+        || !Number.isSafeInteger(remoteStartedAt)
+        || remoteStartedAt < 0
+        || writerId !== remoteWriterId
+        || instanceId === remoteInstanceId) {
+        return 'ignore';
+    }
+    if (established !== remoteEstablished) {
+        return established ? 'keep' : 'rotate';
+    }
+    if (startedAt !== remoteStartedAt) {
+        return startedAt < remoteStartedAt ? 'keep' : 'rotate';
+    }
+    return instanceId > remoteInstanceId ? 'rotate' : 'keep';
+}
+
+export function normalizeWorkspaceRecoveryDraft(value, {
+    projectId: expectedProjectId = '',
+    chapterId: expectedChapterId = '',
+} = {}) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || value.version !== WORKSPACE_RECOVERY_DRAFT_VERSION) return null;
+    const hasWriterId = Object.hasOwn(value, 'writerId');
+    const hasDraftId = Object.hasOwn(value, 'draftId');
+    const legacyIdentity = !hasWriterId && !hasDraftId;
+    if (!legacyIdentity && (
+        !hasWriterId
+        || !hasDraftId
+        || !isWorkspaceRecoveryDraftIdentity(value.writerId)
+        || !isWorkspaceRecoveryDraftIdentity(value.draftId)
+    )) {
+        return null;
+    }
+    const projectId = typeof value.projectId === 'string' ? value.projectId.trim() : '';
+    const chapterId = typeof value.chapterId === 'string' ? value.chapterId.trim() : '';
+    if (!projectId || !chapterId
+        || (expectedProjectId && projectId !== expectedProjectId)
+        || (expectedChapterId && chapterId !== expectedChapterId)
+        || !Number.isSafeInteger(value.projectVersion) || value.projectVersion < 1
+        || !Number.isSafeInteger(value.chapterRevision) || value.chapterRevision < 1) {
+        return null;
+    }
+    const projectDirtyPaths = recoveryPaths(value.projectDirtyPaths);
+    const chapterDirtyPaths = recoveryPaths(value.chapterDirtyPaths);
+    const volumeDirtyFields = recoveryPaths(value.volumeDirtyFields, { maximum: 64, nested: false });
+    const volumeId = typeof value.volumeId === 'string' ? value.volumeId.trim() : '';
+    const volumeRevision = value.volumeRevision === null || value.volumeRevision === undefined
+        ? null
+        : Number(value.volumeRevision);
+    if (volumeDirtyFields.length > 0
+        && (!volumeId || !Number.isSafeInteger(volumeRevision) || volumeRevision < 1)) {
+        return null;
+    }
+    if (projectDirtyPaths.length === 0 && chapterDirtyPaths.length === 0 && volumeDirtyFields.length === 0) {
+        return null;
+    }
+    return {
+        version: WORKSPACE_RECOVERY_DRAFT_VERSION,
+        ...(!legacyIdentity ? {
+            writerId: value.writerId,
+            draftId: value.draftId,
+        } : {}),
+        projectId,
+        projectVersion: value.projectVersion,
+        chapterId,
+        chapterRevision: value.chapterRevision,
+        volumeId,
+        volumeRevision,
+        projectDirtyPaths,
+        chapterDirtyPaths,
+        volumeDirtyFields,
+        projectChanges: recoveryObject(value.projectChanges),
+        chapterChanges: recoveryObject(value.chapterChanges),
+        volumeChanges: recoveryObject(value.volumeChanges),
+        updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
+    };
+}
+
+export function workspaceRecoveryDraftAlreadyApplied(draft, {
+    project = null,
+    chapter = null,
+    volume = null,
+} = {}) {
+    if (!draft || !project || !chapter
+        || project.id !== draft.projectId || chapter.id !== draft.chapterId) return false;
+    const directProjectPaths = draft.projectDirtyPaths.filter(path => !isContinuityPath(path));
+    if (!directProjectPaths.every(path => (
+        valuesEqual(getValueAtPath(project, path), getValueAtPath(draft.projectChanges, path))
+    ))) return false;
+    if (draft.projectDirtyPaths.some(isContinuityPath)
+        && !valuesEqual(project.continuity || [], draft.projectChanges.continuity || [])) {
+        return false;
+    }
+    if (!draft.chapterDirtyPaths.every(path => (
+        valuesEqual(getValueAtPath(chapter, path), getValueAtPath(draft.chapterChanges, path))
+    ))) return false;
+    if (draft.volumeDirtyFields.length > 0) {
+        if (!volume || volume.id !== draft.volumeId) return false;
+        if (!draft.volumeDirtyFields.every(field => (
+            valuesEqual(volume[field], draft.volumeChanges[field])
+        ))) return false;
+    }
+    return true;
+}
+
 export function pendingChangeSetNavigationPolicy({ dirty = false, valid = false, adopting = false } = {}) {
     if (adopting) return 'block';
     if (!dirty) return 'continue';
@@ -772,6 +1010,17 @@ function valuesEqual(left, right) {
 
 export function getValueAtPath(value, fieldPath) {
     return String(fieldPath).split('.').reduce((current, key) => current?.[key], value);
+}
+
+export function combineFieldPaths(...collections) {
+    const combined = new Set();
+    for (const collection of collections) {
+        if (!collection || typeof collection[Symbol.iterator] !== 'function') continue;
+        for (const fieldPath of collection) {
+            if (typeof fieldPath === 'string' && fieldPath) combined.add(fieldPath);
+        }
+    }
+    return combined;
 }
 
 export function mergeDirtyPaths(remote, local, fieldPaths) {

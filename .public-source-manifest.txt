@@ -13,6 +13,7 @@ fixtures/quality-regression-baseline-v1.json
 fixtures/quality-regression-v1.json
 package-lock.json
 package.json
+playwright.config.js
 public/app.js
 public/context-compiler.js
 public/copilot-ui.js
@@ -22,6 +23,7 @@ public/index.html
 public/prompt-engine.js
 public/prompt-profile-compiler.js
 public/prompt-profile-ui.js
+public/save-state.js
 public/style.css
 public/volume-ui.js
 scripts/check-docs.js
@@ -66,6 +68,9 @@ src/workflow-v2-runtime.js
 start-story-studio.ps1
 tests/adoption-authority.test.js
 tests/api.test.js
+tests/browser/fixture-server.js
+tests/browser/multitab-authority.spec.js
+tests/browser/workflow-helper.js
 tests/builtin-writing-profiles.test.js
 tests/chapter-management.test.js
 tests/chapter-version-api.test.js
@@ -109,6 +114,7 @@ tests/retrieval-index.test.js
 tests/retrieval-router-safety.test.js
 tests/retrieval-store.test.js
 tests/retrieval-ui.test.js
+tests/save-state.test.js
 tests/schema-v4-migration.test.js
 tests/store.test.js
 tests/story-state.test.js

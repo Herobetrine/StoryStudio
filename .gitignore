@@ -4,6 +4,11 @@ data/secrets.json
 coverage/
 *.log
 logs/
+playwright-report/
+test-results/
+blob-report/
+.playwright/
+ms-playwright/
 
 # Local-only research, reverse engineering, comparison notes, checkpoints,
 # acceptance evidence, and other material outside the public source tree.

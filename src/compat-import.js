@@ -67,12 +67,46 @@ const CONTEXT_STRING_FIELDS = ['name', 'story_string', 'example_separator', 'cha
 const CONTEXT_BOOLEAN_FIELDS = [
     'use_stop_strings', 'names_as_stop_strings', 'always_force_name2', 'trim_sentences', 'single_line',
 ];
-const SENSITIVE_PRESET_FIELDS = new Set([
-    'apiKey', 'api_key', 'apikey', 'authorization', 'headers', 'custom_include_headers', 'proxy_password',
-    'reverse_proxy', 'custom_url', 'baseUrl', 'base_url', 'vertexai_region', 'vertexai_express_project_id',
-    'azure_base_url', 'azure_deployment_name', 'workers_ai_account_id', 'siliconflow_endpoint',
-    'minimax_endpoint', 'zai_endpoint',
+const CREDENTIAL_RESOURCE_KEYS = new Set([
+    'apikey', 'authorization', 'auth', 'authentication', 'bearer', 'proxypassword',
+    'accesstoken', 'refreshtoken', 'idtoken', 'bearertoken', 'authtoken', 'customauthtoken',
+    'clientsecret', 'clientpassword', 'password', 'passwd', 'passphrase',
+    'cookie', 'cookies', 'setcookie', 'header', 'headers', 'customincludeheaders',
+    'privatekey', 'secretkey', 'signingkey', 'webhooksecret', 'credential', 'credentials',
+    'awsaccesskeyid', 'sessioncookie', 'sessioncookies',
+    'githubtoken', 'gitlabtoken', 'huggingfacetoken', 'hftoken', 'replicatetoken', 'novelaitoken',
+    'chubtoken', 'openaitoken', 'anthropictoken', 'openroutertoken', 'googletoken', 'geminitoken',
+    'azuretoken', 'mistraltoken', 'mistralaitoken', 'coheretoken', 'groqtoken', 'deepseektoken',
+    'xaitoken', 'zaitoken', 'siliconflowtoken', 'minimaxtoken', 'togethertoken', 'togetheraitoken',
+    'fireworkstoken', 'fireworksaitoken', 'perplexitytoken', 'cerebrastoken', 'sambanovatoken',
+    'cloudflaretoken', 'workersaitoken',
 ]);
+const CREDENTIAL_RESOURCE_KEY_PATTERNS = [
+    /^(?:[a-z0-9]*(?:api|access|refresh|bearer|auth|authorization|authentication|oauth|session))(?:key|secret|token)$/,
+    /^[a-z0-9]*(?:access|refresh|bearer|auth|authorization|authentication|oauth[0-9]*|session)tokenvalue$/,
+    /^idtokenvalue$/,
+    /^(?:[a-z0-9]*client)(?:key|secret|password|token)$/,
+    /^(?:[a-z0-9]*proxy)(?:authorization|auth|key|secret|password|token)$/,
+    /^[a-z0-9]*api(?:key|secret|token)[a-z0-9]*$/,
+    /^[a-z0-9]*(?:private|secret|signing|encryption)key$/,
+    /^[a-z0-9]*(?:auth|authorization|http|request|proxy|custom|include|extra|raw|provider|api|connection|transport)headers?$/,
+    /^[a-z0-9]*webhooksecret$/,
+    /^[a-z0-9]*credentials?$/,
+    /^[a-z0-9]*(?:oauth[0-9]*|jwt|csrf|xsrf)(?:key|secret|token)?$/,
+    /^[a-z0-9]*(?:auth|authorization|authentication|bearer)(?:header|headers|cookie|cookies|value)$/,
+    /^[a-z0-9]*session(?:cookie|cookies)$/,
+    /^[a-z0-9]*(?:password|passwd|passphrase)$/,
+];
+const PRESET_CONNECTION_KEYS = new Set([
+    'header', 'headers', 'customincludeheaders', 'reverseproxy', 'customurl', 'baseurl',
+    'vertexairegion', 'vertexaiexpressprojectid', 'azurebaseurl', 'azuredeploymentname',
+    'workersaiaccountid', 'siliconflowendpoint', 'minimaxendpoint', 'zaiendpoint',
+    'endpoint', 'url', 'accountid',
+]);
+const PRESET_CONNECTION_KEY_PATTERNS = [
+    /^(?:[a-z0-9]*(?:auth|authorization|http|request|proxy|custom|include))headers?$/,
+    /^(?:api|base|custom|provider|proxy|reverseproxy|service|openai|anthropic|openrouter|azure|vertexai|google|mistralai|workersai|siliconflow|minimax|zai)(?:url|endpoint|accountid|projectid|region|deploymentname)$/,
+];
 const PROFILE_CLIP_POLICIES = new Set(['head', 'tail', 'middle', 'drop', 'error']);
 const PROFILE_ROLES = new Set(['system', 'user', 'assistant']);
 const PROFILE_MACROS = new Set([
@@ -182,6 +216,64 @@ function safeJsonClone(value, label = 'resource data') {
         throw new CompatImportError(`${label} exceeds the JSON import limit.`, 'resource_too_large', { maximum: MAX_COMPAT_JSON_BYTES }, 413);
     }
     return result;
+}
+
+function normalizedSensitiveKey(value) {
+    return String(value)
+        .normalize('NFKD')
+        .replace(/\p{M}/gu, '')
+        .toLocaleLowerCase('en-US')
+        .replace(/[^a-z0-9]/g, '');
+}
+
+function isSensitiveResourceKey(key, { includeConnectionFields = false } = {}) {
+    const normalized = normalizedSensitiveKey(key);
+    const candidates = normalized.endsWith('value') && normalized.length > 'value'.length
+        ? [normalized, normalized.slice(0, -'value'.length)]
+        : [normalized];
+    if (candidates.some(candidate => (
+        CREDENTIAL_RESOURCE_KEYS.has(candidate)
+        || CREDENTIAL_RESOURCE_KEY_PATTERNS.some(pattern => pattern.test(candidate))
+    ))) {
+        return true;
+    }
+    return includeConnectionFields && candidates.some(candidate => (
+        PRESET_CONNECTION_KEYS.has(candidate)
+        || PRESET_CONNECTION_KEY_PATTERNS.some(pattern => pattern.test(candidate))
+    ));
+}
+
+function sanitizeSensitiveFields(value, path = '', removed = [], options = {}) {
+    if (Array.isArray(value)) {
+        return value.map((item, index) => sanitizeSensitiveFields(item, `${path}[${index}]`, removed, options));
+    }
+    if (!value || typeof value !== 'object') return value;
+    const result = {};
+    for (const [key, item] of Object.entries(value)) {
+        if (DANGEROUS_KEYS.has(key)) {
+            throw new CompatImportError('Resource contains a forbidden key.', 'unsafe_resource_key', { key });
+        }
+        const itemPath = path ? `${path}.${key}` : key;
+        if (isSensitiveResourceKey(key, options)) {
+            removed.push(itemPath);
+            continue;
+        }
+        result[key] = sanitizeSensitiveFields(item, itemPath, removed, options);
+    }
+    return result;
+}
+
+function sanitizeJsonClone(value, label, path = '', removed = [], options = {}) {
+    return sanitizeSensitiveFields(safeJsonClone(value, label), path, removed, options);
+}
+
+function attachRemovedSensitiveFields(source, removed) {
+    if (removed.length === 0) return source;
+    const prior = Array.isArray(source.removedSensitiveFields)
+        ? source.removedSensitiveFields.filter(item => typeof item === 'string')
+        : [];
+    source.removedSensitiveFields = [...new Set([...prior, ...removed])];
+    return source;
 }
 
 function cleanString(value, label, maximum, fallback = '') {
@@ -398,15 +490,25 @@ export function parseCharacterPng(bufferValue) {
     };
 }
 
-function normalizeSource(format, spec, specVersion, fileName, raw, extra = {}) {
-    return {
+function normalizeSource(
+    format,
+    spec,
+    specVersion,
+    fileName,
+    raw,
+    extra = {},
+    removedSensitiveFields = [],
+    sanitizerOptions = {},
+) {
+    const source = {
         format,
         spec: spec || '',
         specVersion: specVersion || '',
         fileName: cleanString(fileName, 'source.fileName', 255),
-        raw: safeJsonClone(raw, 'source.raw'),
-        ...extra,
+        raw: sanitizeJsonClone(raw, 'source.raw', 'source.raw', removedSensitiveFields, sanitizerOptions),
+        ...sanitizeJsonClone(extra, 'source metadata', 'source', removedSensitiveFields, sanitizerOptions),
     };
+    return attachRemovedSensitiveFields(source, removedSensitiveFields);
 }
 
 function normalizeDepthPrompt(value) {
@@ -420,7 +522,13 @@ function normalizeDepthPrompt(value) {
 }
 
 function characterDraftFromCard(cardValue, { fileName, format, avatar = null, metadataKind = '', warnings = [] } = {}) {
-    const card = assertPlainObject(cardValue, 'character card');
+    const removedSensitiveFields = [];
+    const card = sanitizeJsonClone(
+        assertPlainObject(cardValue, 'character card'),
+        'character card',
+        '',
+        removedSensitiveFields,
+    );
     let data;
     let spec = '';
     let specVersion = '';
@@ -459,6 +567,17 @@ function characterDraftFromCard(cardValue, { fileName, format, avatar = null, me
             fileName: `${name} lorebook.json`,
             format: 'character-book',
         });
+    if (embeddedBook) {
+        const embeddedPathPrefix = spec === 'chara_card_v1'
+            ? 'character_book.'
+            : 'data.character_book.';
+        attachRemovedSensitiveFields(
+            embeddedBook.draft.source,
+            removedSensitiveFields
+                .filter(field => field.startsWith(embeddedPathPrefix))
+                .map(field => field.slice(embeddedPathPrefix.length)),
+        );
+    }
     const extensions = data.extensions === undefined ? {} : safeJsonClone(assertPlainObject(data.extensions, 'character extensions'), 'character extensions');
     const depthPrompt = extensions.depth_prompt === undefined ? null : normalizeDepthPrompt(extensions.depth_prompt);
     const draft = {
@@ -483,7 +602,7 @@ function characterDraftFromCard(cardValue, { fileName, format, avatar = null, me
         source: normalizeSource(format, spec, specVersion, fileName, card, {
             metadataKind,
             warnings: cleanStringArray(warnings, 'source.warnings', 100, 200),
-        }),
+        }, removedSensitiveFields),
     };
     return { type: 'character', draft, embeddedLorebook: embeddedBook };
 }
@@ -501,11 +620,16 @@ function optionalNumber(value, label, minimum, maximum, { integer = false } = {}
     return value === null || value === undefined ? null : cleanNumber(value, label, minimum, maximum, null, { integer });
 }
 
-function normalizeLorebookEntry(value, index, sourceKind) {
+function normalizeLorebookEntry(value, index, sourceKind, removedSensitiveFields = []) {
     const entry = assertPlainObject(value, `entries[${index}]`);
     const extensions = entry.extensions === undefined
         ? {}
-        : safeJsonClone(assertPlainObject(entry.extensions, `entries[${index}].extensions`), `entries[${index}].extensions`);
+        : sanitizeJsonClone(
+            assertPlainObject(entry.extensions, `entries[${index}].extensions`),
+            `entries[${index}].extensions`,
+            `entries[${index}].extensions`,
+            removedSensitiveFields,
+        );
     const isCharacterBook = sourceKind === 'character-book';
     const id = entryId(isCharacterBook ? (entry.id ?? entry.uid) : (entry.uid ?? entry.id), index);
     const keys = cleanStringArray(isCharacterBook ? entry.keys : entry.key, `entries[${index}].keys`, 1_000, 20_000);
@@ -605,7 +729,13 @@ function lorebookCompatibilityWarnings(entries, { recursiveScanning = false } = 
 }
 
 function lorebookDraftFromValue(value, { fileName, format = 'sillytavern-world-info' } = {}) {
-    const book = assertPlainObject(value, 'lorebook');
+    const removedSensitiveFields = [];
+    const book = sanitizeJsonClone(
+        assertPlainObject(value, 'lorebook'),
+        'lorebook',
+        '',
+        removedSensitiveFields,
+    );
     const sourceKind = Array.isArray(book.entries) ? 'character-book' : 'sillytavern-world-info';
     let sourceEntries;
     if (sourceKind === 'character-book') {
@@ -619,7 +749,9 @@ function lorebookDraftFromValue(value, { fileName, format = 'sillytavern-world-i
     if (sourceEntries.length > MAX_LOREBOOK_ENTRIES) {
         throw new CompatImportError('Lorebook contains too many entries.', 'resource_array_too_large', { maximum: MAX_LOREBOOK_ENTRIES }, 413);
     }
-    const entries = sourceEntries.map((entry, index) => normalizeLorebookEntry(entry, index, sourceKind));
+    const entries = sourceEntries.map((entry, index) => (
+        normalizeLorebookEntry(entry, index, sourceKind, removedSensitiveFields)
+    ));
     const seen = new Set();
     for (const entry of entries) {
         if (seen.has(entry.id)) {
@@ -629,7 +761,12 @@ function lorebookDraftFromValue(value, { fileName, format = 'sillytavern-world-i
     }
     const extensions = book.extensions === undefined
         ? {}
-        : safeJsonClone(assertPlainObject(book.extensions, 'lorebook extensions'), 'lorebook extensions');
+        : sanitizeJsonClone(
+            assertPlainObject(book.extensions, 'lorebook extensions'),
+            'lorebook extensions',
+            'extensions',
+            removedSensitiveFields,
+        );
     const recursiveScanning = cleanBoolean(book.recursive_scanning, 'lorebook.recursiveScanning', false);
     const compatibilityWarnings = lorebookCompatibilityWarnings(entries, { recursiveScanning });
     return {
@@ -644,27 +781,13 @@ function lorebookDraftFromValue(value, { fileName, format = 'sillytavern-world-i
             entries,
             source: normalizeSource(format || sourceKind, sourceKind, '', fileName, book, {
                 ...(compatibilityWarnings.length > 0 ? { compatibilityWarnings } : {}),
-            }),
+            }, removedSensitiveFields),
         },
     };
 }
 
 function redactPreset(value, path = '', removed = []) {
-    if (Array.isArray(value)) return value.map((item, index) => redactPreset(item, `${path}[${index}]`, removed));
-    if (!value || typeof value !== 'object') return value;
-    const result = {};
-    for (const [key, item] of Object.entries(value)) {
-        if (DANGEROUS_KEYS.has(key)) {
-            throw new CompatImportError('Preset contains a forbidden key.', 'unsafe_resource_key', { key });
-        }
-        if (SENSITIVE_PRESET_FIELDS.has(key)
-            || /(?:api[_-]?key|authorization|proxy[_-]?password|headers?|endpoint|url|account[_-]?id)$/i.test(key)) {
-            removed.push(path ? `${path}.${key}` : key);
-            continue;
-        }
-        result[key] = redactPreset(item, path ? `${path}.${key}` : key, removed);
-    }
-    return result;
+    return sanitizeSensitiveFields(value, path, removed, { includeConnectionFields: true });
 }
 
 function normalizeInstruct(value) {
@@ -1122,9 +1245,14 @@ function normalizeOptionalSection(value, label, fields) {
 
 function promptProfileDraftFromValue(value, { fileName } = {}) {
     const original = assertPlainObject(value, 'prompt preset');
-    const safeOriginal = safeJsonClone(original, 'prompt preset');
     const removedSensitiveFields = [];
-    const redacted = redactPreset(safeOriginal, '', removedSensitiveFields);
+    const redacted = sanitizeJsonClone(
+        original,
+        'prompt preset',
+        '',
+        removedSensitiveFields,
+        { includeConnectionFields: true },
+    );
     if (Object.hasOwn(redacted, 'profileVersion')) {
         assertKnownKeys(redacted, PROMPT_PROFILE_FIELDS, 'native prompt profile');
         const existingSource = assertPlainObject(redacted.source ?? {}, 'prompt profile.source');
@@ -1206,7 +1334,7 @@ function promptProfileDraftFromValue(value, { fileName } = {}) {
             source: normalizeSource(detected, detected, '', fileName, redacted, {
                 removedSensitiveFields,
                 ...(compatibilityWarnings.length > 0 ? { compatibilityWarnings } : {}),
-            }),
+            }, removedSensitiveFields, { includeConnectionFields: true }),
         },
     };
 }
@@ -1271,6 +1399,28 @@ export function normalizeResourceType(value) {
 
 function normalizeInternalCharacter(value) {
     const input = assertPlainObject(value, 'character resource');
+    const removedSensitiveFields = [];
+    const extensions = sanitizeJsonClone(
+        assertPlainObject(input.extensions ?? {}, 'character.extensions'),
+        'character.extensions',
+        'extensions',
+        removedSensitiveFields,
+    );
+    const avatar = input.avatar === null || input.avatar === undefined
+        ? null
+        : sanitizeJsonClone(
+            assertPlainObject(input.avatar, 'character.avatar'),
+            'character.avatar',
+            'avatar',
+            removedSensitiveFields,
+        );
+    const source = sanitizeJsonClone(
+        assertPlainObject(input.source ?? {}, 'character.source'),
+        'character.source',
+        'source',
+        removedSensitiveFields,
+    );
+    attachRemovedSensitiveFields(source, removedSensitiveFields);
     return {
         name: cleanName(input.name, 'Imported character'),
         description: cleanString(input.description, 'character.description', 250_000),
@@ -1285,19 +1435,20 @@ function normalizeInternalCharacter(value) {
         tags: cleanStringArray(input.tags, 'character.tags', 1_000, 1_000),
         creator: cleanString(input.creator, 'character.creator', 10_000),
         characterVersion: cleanString(input.characterVersion, 'character.characterVersion', 1_000),
-        extensions: safeJsonClone(assertPlainObject(input.extensions ?? {}, 'character.extensions'), 'character.extensions'),
+        extensions,
         depthPrompt: normalizeDepthPrompt(input.depthPrompt),
         instructionEnabled: cleanBoolean(input.instructionEnabled, 'character.instructionEnabled', false),
         embeddedLorebookId: input.embeddedLorebookId === null || input.embeddedLorebookId === undefined
             ? null
             : cleanString(input.embeddedLorebookId, 'character.embeddedLorebookId', 64),
-        avatar: input.avatar === null || input.avatar === undefined ? null : safeJsonClone(assertPlainObject(input.avatar, 'character.avatar'), 'character.avatar'),
-        source: safeJsonClone(assertPlainObject(input.source ?? {}, 'character.source'), 'character.source'),
+        avatar,
+        source,
     };
 }
 
 function normalizeInternalLorebook(value) {
     const input = assertPlainObject(value, 'lorebook resource');
+    const removedSensitiveFields = [];
     if (!Array.isArray(input.entries) || input.entries.length > MAX_LOREBOOK_ENTRIES) {
         throw new CompatImportError('lorebook.entries is invalid.', 'invalid_lorebook');
     }
@@ -1334,22 +1485,35 @@ function normalizeInternalLorebook(value) {
                 vectorized: entry.vectorized,
                 selectiveLogic: entry.selectiveLogic,
             },
-        }, index, 'sillytavern-world-info');
+        }, index, 'sillytavern-world-info', removedSensitiveFields);
         normalized.id = entryId(entry.id, index);
         normalized.sourceUid = entry.sourceUid ?? normalized.sourceUid;
         return normalized;
     });
     const ids = new Set(entries.map(entry => entry.id));
     if (ids.size !== entries.length) throw new CompatImportError('Lorebook contains duplicate entry identifiers.', 'duplicate_lorebook_entry');
+    const extensions = sanitizeJsonClone(
+        assertPlainObject(input.extensions ?? {}, 'lorebook.extensions'),
+        'lorebook.extensions',
+        'extensions',
+        removedSensitiveFields,
+    );
+    const source = sanitizeJsonClone(
+        assertPlainObject(input.source ?? {}, 'lorebook.source'),
+        'lorebook.source',
+        'source',
+        removedSensitiveFields,
+    );
+    attachRemovedSensitiveFields(source, removedSensitiveFields);
     return {
         name: cleanName(input.name, 'Imported lorebook'),
         description: cleanString(input.description, 'lorebook.description', 250_000),
         scanDepth: optionalNumber(input.scanDepth, 'lorebook.scanDepth', 0, 100_000, { integer: true }),
         tokenBudget: optionalNumber(input.tokenBudget, 'lorebook.tokenBudget', 0, 2_000_000, { integer: true }),
         recursiveScanning: cleanBoolean(input.recursiveScanning, 'lorebook.recursiveScanning', false),
-        extensions: safeJsonClone(assertPlainObject(input.extensions ?? {}, 'lorebook.extensions'), 'lorebook.extensions'),
+        extensions,
         entries,
-        source: safeJsonClone(assertPlainObject(input.source ?? {}, 'lorebook.source'), 'lorebook.source'),
+        source,
     };
 }
 
@@ -1561,17 +1725,20 @@ function normalizeInternalChatCompletion(value, removedSensitiveFields) {
 function normalizeInternalPromptProfile(value) {
     const input = assertPlainObject(value, 'prompt profile resource');
     const removedSensitiveFields = [];
-    const safeSource = redactPreset(safeJsonClone(assertPlainObject(input.source ?? {}, 'prompt profile.source'), 'prompt profile.source'), 'source', removedSensitiveFields);
+    const safeSource = sanitizeJsonClone(
+        assertPlainObject(input.source ?? {}, 'prompt profile.source'),
+        'prompt profile.source',
+        'source',
+        removedSensitiveFields,
+        { includeConnectionFields: true },
+    );
     const chatCompletion = normalizeInternalChatCompletion(input.chatCompletion, removedSensitiveFields);
     const hasV2Fields = [
         'profileVersion', 'modules', 'order', 'variables', 'variableValues', 'generationPolicies',
         'taskPolicies', 'tokenBudget', 'characterBudget', 'compatibility',
     ]
         .some(field => input[field] !== undefined);
-    if (removedSensitiveFields.length > 0) {
-        const prior = Array.isArray(safeSource.removedSensitiveFields) ? safeSource.removedSensitiveFields : [];
-        safeSource.removedSensitiveFields = [...new Set([...prior, ...removedSensitiveFields])];
-    }
+    attachRemovedSensitiveFields(safeSource, removedSensitiveFields);
     const result = {
         name: cleanName(input.name, 'Imported prompt profile'),
         instruct: normalizeInstruct(input.instruct),
@@ -1652,10 +1819,7 @@ function normalizeInternalPromptProfile(value) {
         ...(tokenBudget !== null ? { tokenBudget } : {}),
         ...(characterBudget !== null ? { characterBudget } : {}),
     });
-    if (removedSensitiveFields.length > 0) {
-        const prior = Array.isArray(safeSource.removedSensitiveFields) ? safeSource.removedSensitiveFields : [];
-        safeSource.removedSensitiveFields = [...new Set([...prior, ...removedSensitiveFields])];
-    }
+    attachRemovedSensitiveFields(safeSource, removedSensitiveFields);
     return result;
 }
 
@@ -1739,10 +1903,20 @@ export function validateResourceRecord(resourceValue, projectId, resourceId, exp
         || !Number.isSafeInteger(resource.revision) || resource.revision < 1) {
         throw new CompatImportError('Stored resource uses an unsupported schema.', 'invalid_resource_storage', {}, 500);
     }
-    const data = Object.fromEntries(typeFields(type).map(field => [field, resource[field]]));
-    normalizeResourceData(type, data);
     assertResourceRecordSize(resource);
-    return resource;
+    const data = Object.fromEntries(typeFields(type).map(field => [field, resource[field]]));
+    const normalized = {
+        schemaVersion: resource.schemaVersion,
+        type,
+        id: resource.id,
+        projectId: resource.projectId,
+        ...normalizeResourceData(type, data),
+        revision: resource.revision,
+        createdAt: resource.createdAt,
+        updatedAt: resource.updatedAt,
+    };
+    assertResourceRecordSize(normalized);
+    return normalized;
 }
 
 export function assertResourceRecordSize(resource) {

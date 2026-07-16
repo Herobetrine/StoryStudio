@@ -144,12 +144,12 @@ export function createApp({
     fetchImplementation = globalThis.fetch,
 } = {}) {
     const resolvedDataRoot = path.resolve(dataRoot);
+    const providerStore = new ProviderStore(resolvedDataRoot);
     const storyStore = new StoryStudioStore(path.join(resolvedDataRoot, 'story-studio'), {
         migrationBackupsDirectory: path.join(resolvedDataRoot, 'migration-backups'),
     });
     const generationStore = new GenerationStore(path.join(resolvedDataRoot, 'generation-history'));
     const chapterVersionStore = new ChapterVersionStore(path.join(resolvedDataRoot, 'chapter-versions'));
-    const providerStore = new ProviderStore(resolvedDataRoot);
     const retrievalStore = new RetrievalStore(path.join(resolvedDataRoot, 'retrieval'), {
         storyStore,
         reranker: createRetrievalReranker(providerStore, fetchImplementation),

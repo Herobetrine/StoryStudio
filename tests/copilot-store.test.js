@@ -109,4 +109,33 @@ describe('Copilot sidecar store', () => {
             error => error.code === 'copilot_session_conflict',
         );
     });
+
+    test('does not create a session through a linked sessions directory', t => {
+        const externalRoot = path.join(root, 'external-root');
+        const linkedRoot = path.join(root, 'linked-root');
+        const externalSessions = path.join(root, '..', `${path.basename(root)}-external-sessions`);
+        t.after(() => fs.rmSync(externalSessions, { recursive: true, force: true }));
+        const projectDirectory = path.join(root, 'projects', 'project-one');
+        fs.mkdirSync(externalRoot);
+        fs.symlinkSync(externalRoot, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir');
+        assert.throws(
+            () => new CopilotStore(linkedRoot),
+            error => error?.code === 'unsafe_copilot_path',
+        );
+        assert.deepEqual(fs.readdirSync(externalRoot), []);
+
+        fs.mkdirSync(externalSessions, { recursive: true });
+        fs.mkdirSync(projectDirectory, { recursive: true });
+        fs.symlinkSync(
+            externalSessions,
+            path.join(projectDirectory, 'sessions'),
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+
+        assert.throws(
+            () => store.createSession(record()),
+            error => error?.code === 'unsafe_copilot_path',
+        );
+        assert.deepEqual(fs.readdirSync(externalSessions), []);
+    });
 });

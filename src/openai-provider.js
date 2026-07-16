@@ -414,11 +414,22 @@ function responseContent(messageContent) {
     return parts.length > 0 ? parts.join('') : null;
 }
 
-function safeUpstreamMessage(payload, fallback) {
+function redactSensitiveText(value, sensitiveValues = []) {
+    let result = String(value);
+    for (const sensitiveValue of sensitiveValues) {
+        if (typeof sensitiveValue !== 'string' || sensitiveValue.length === 0) continue;
+        result = result.replaceAll(sensitiveValue, '[REDACTED]');
+    }
+    return result;
+}
+
+function safeUpstreamMessage(payload, fallback, sensitiveValues = []) {
     const candidate = typeof payload?.error === 'string'
         ? payload.error
         : payload?.error?.message ?? payload?.message;
-    return typeof candidate === 'string' && candidate.length > 0 ? candidate.slice(0, 1_000) : fallback;
+    return typeof candidate === 'string' && candidate.length > 0
+        ? redactSensitiveText(candidate, sensitiveValues).slice(0, 1_000)
+        : fallback;
 }
 
 function isUnsupportedSchema(status, message) {
@@ -1236,7 +1247,11 @@ export async function createStreamingCompletion(settings, request, {
                 if (abortContext.signal.aborted) {
                     throwStreamingTransportError(abortContext.signal.reason, abortContext, externalSignal);
                 }
-                const upstreamMessage = safeUpstreamMessage(payload, 'The model provider rejected the request.');
+                const upstreamMessage = safeUpstreamMessage(
+                    payload,
+                    'The model provider rejected the request.',
+                    [settings.apiKey],
+                );
                 if (adapter.openAiFallbacks && adapter.body.response_format
                     && isUnsupportedSchema(response.status, upstreamMessage)) {
                     delete adapter.body.response_format;
@@ -1266,7 +1281,11 @@ export async function createStreamingCompletion(settings, request, {
                     const payload = parseStreamPayload(record);
                     if (payload === null) break;
                     if (payload?.error || record.event === 'error') {
-                        throw new ApiError(502, 'provider_http_error', safeUpstreamMessage(payload, 'The model provider stream failed.'));
+                        throw new ApiError(502, 'provider_http_error', safeUpstreamMessage(
+                            payload,
+                            'The model provider stream failed.',
+                            [settings.apiKey],
+                        ));
                     }
                     const chunk = parseStreamingChunk(protocol, payload, record.event);
                     if (typeof chunk.model === 'string' && chunk.model.length > 0) model = chunk.model;
@@ -1377,7 +1396,11 @@ export async function createChatCompletion(settings, request, {
                 });
             }
             if (!response.ok) {
-                const upstreamMessage = safeUpstreamMessage(payload, 'The model provider rejected the request.');
+                const upstreamMessage = safeUpstreamMessage(
+                    payload,
+                    'The model provider rejected the request.',
+                    [settings.apiKey],
+                );
                 if (adapter.openAiFallbacks && adapter.body.response_format
                     && isUnsupportedSchema(response.status, upstreamMessage)) {
                     delete adapter.body.response_format;

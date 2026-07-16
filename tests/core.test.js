@@ -5,20 +5,54 @@ import { describe, test } from 'node:test';
 import {
     buildGenerationRequest,
     buildContextualGenerationRequest,
+    compareAndRemoveWorkspaceRecoveryDraft,
+    combineFieldPaths,
     continuityView,
     countContentUnits,
     findConflictingPaths,
     fitGenerationBudget,
+    isWorkspaceRecoveryDraftIdentity,
     mergeContinuity,
     mergeDirtyPaths,
     mergeProjectDirtyPaths,
     nextPromptCharacterLimit,
+    normalizeWorkspaceRecoveryDraft,
     parseStructuredResponse,
     PLAN_SCHEMA,
     DISTILLATION_SCHEMA,
     promptCharacterLimitForContext,
     safeFileName,
+    scanWorkspaceRecoveryDrafts,
+    selectWorkspaceRecoveryDraft,
+    workspaceRecoveryDraftAlreadyApplied,
+    workspaceRecoveryDraftCleanupDecision,
+    workspaceRecoveryDraftRestorePolicy,
+    workspaceRecoveryDraftStorageKey,
+    workspaceRecoveryDraftStoragePrefix,
+    workspaceRecoveryWriterCollisionAction,
+    workspaceAuthorityMutationAllowsView,
 } from '../public/core.js';
+
+function createMemoryStorage(initial = {}) {
+    const values = new Map(Object.entries(initial));
+    return {
+        get length() {
+            return values.size;
+        },
+        key(index) {
+            return [...values.keys()][index] ?? null;
+        },
+        getItem(key) {
+            return values.has(key) ? values.get(key) : null;
+        },
+        setItem(key, value) {
+            values.set(String(key), String(value));
+        },
+        removeItem(key) {
+            values.delete(key);
+        },
+    };
+}
 
 describe('standalone frontend core compatibility', () => {
     test('counts Han characters and non-Han word runs', () => {
@@ -653,6 +687,429 @@ describe('standalone frontend core compatibility', () => {
         assert.equal(safeFileName('长篇:第一部?.json'), '长篇_第一部_.json');
     });
 
+    test('normalizes writer-bound recovery drafts while retaining legacy v1 records', () => {
+        const writerId = 'writer-one-0000000000000001';
+        const draftId = 'draft-one-00000000000000001';
+        assert.equal(
+            workspaceRecoveryDraftStorageKey('project one', 'chapter/one'),
+            'story-studio:workspace-recovery:v1:project%20one:chapter%2Fone',
+        );
+        assert.equal(
+            workspaceRecoveryDraftStorageKey('project one', 'chapter/one', writerId),
+            `story-studio:workspace-recovery:v1:project%20one:chapter%2Fone:${writerId}`,
+        );
+        assert.equal(
+            workspaceRecoveryDraftStoragePrefix('project one', 'chapter/one'),
+            'story-studio:workspace-recovery:v1:project%20one:chapter%2Fone:',
+        );
+        assert.equal(isWorkspaceRecoveryDraftIdentity(writerId), true);
+        assert.equal(isWorkspaceRecoveryDraftIdentity('short'), false);
+        assert.equal(workspaceRecoveryDraftStorageKey('project-one', 'chapter-one', 'bad:id'), '');
+
+        const rawDraft = {
+            version: 1,
+            writerId,
+            draftId,
+            projectId: 'project-one',
+            projectVersion: 7,
+            chapterId: 'chapter-one',
+            chapterRevision: 3,
+            volumeId: 'volume-one',
+            volumeRevision: 2,
+            projectDirtyPaths: ['story.premise', 'story.premise', '__proto__.polluted'],
+            chapterDirtyPaths: ['content'],
+            volumeDirtyFields: ['title'],
+            projectChanges: { story: { premise: '本地命题' } },
+            chapterChanges: { content: '未保存正文' },
+            volumeChanges: { title: '本地卷名' },
+            updatedAt: '2026-07-16T00:00:00.000Z',
+        };
+        const draft = normalizeWorkspaceRecoveryDraft(rawDraft, {
+            projectId: 'project-one',
+            chapterId: 'chapter-one',
+        });
+        assert.equal(draft.writerId, writerId);
+        assert.equal(draft.draftId, draftId);
+        assert.deepEqual(draft.projectDirtyPaths, ['story.premise']);
+        assert.deepEqual(draft.chapterDirtyPaths, ['content']);
+        assert.deepEqual(draft.volumeDirtyFields, ['title']);
+        assert.equal(
+            normalizeWorkspaceRecoveryDraft({ ...draft, projectVersion: 0 }),
+            null,
+        );
+        assert.equal(
+            normalizeWorkspaceRecoveryDraft(draft, { projectId: 'project-two' }),
+            null,
+        );
+        assert.equal(
+            normalizeWorkspaceRecoveryDraft({ ...rawDraft, writerId: 'short' }),
+            null,
+        );
+        const missingDraftId = { ...rawDraft };
+        delete missingDraftId.draftId;
+        assert.equal(normalizeWorkspaceRecoveryDraft(missingDraftId), null);
+
+        const legacyDraft = { ...rawDraft };
+        delete legacyDraft.writerId;
+        delete legacyDraft.draftId;
+        const normalizedLegacy = normalizeWorkspaceRecoveryDraft(legacyDraft);
+        assert.ok(normalizedLegacy);
+        assert.equal(Object.hasOwn(normalizedLegacy, 'writerId'), false);
+        assert.equal(Object.hasOwn(normalizedLegacy, 'draftId'), false);
+    });
+
+    test('scans every same-chapter writer key and prefers the current writer record', () => {
+        const ownWriterId = 'writer-own-00000000000000001';
+        const foreignWriterId = 'writer-foreign-0000000000001';
+        const mismatchedWriterId = 'writer-mismatch-000000000000';
+        const baseDraft = {
+            version: 1,
+            projectId: 'project-one',
+            projectVersion: 7,
+            chapterId: 'chapter-one',
+            chapterRevision: 3,
+            volumeId: '',
+            volumeRevision: null,
+            projectDirtyPaths: [],
+            chapterDirtyPaths: ['content'],
+            volumeDirtyFields: [],
+            projectChanges: {},
+            chapterChanges: { content: '未保存正文' },
+            volumeChanges: {},
+        };
+        const ownDraft = {
+            ...baseDraft,
+            writerId: ownWriterId,
+            draftId: 'draft-own-000000000000000001',
+            updatedAt: '2026-07-16T00:00:01.000Z',
+        };
+        const foreignDraft = {
+            ...baseDraft,
+            writerId: foreignWriterId,
+            draftId: 'draft-foreign-00000000000001',
+            updatedAt: '2026-07-16T00:00:03.000Z',
+        };
+        const legacyDraft = {
+            ...baseDraft,
+            updatedAt: '2026-07-16T00:00:02.000Z',
+        };
+        const storage = createMemoryStorage({
+            [workspaceRecoveryDraftStorageKey('project-one', 'chapter-one', ownWriterId)]: JSON.stringify(ownDraft),
+            [workspaceRecoveryDraftStorageKey('project-one', 'chapter-one', foreignWriterId)]: JSON.stringify(foreignDraft),
+            [workspaceRecoveryDraftStorageKey('project-one', 'chapter-one')]: JSON.stringify(legacyDraft),
+            [workspaceRecoveryDraftStorageKey('project-one', 'chapter-one', mismatchedWriterId)]: JSON.stringify(foreignDraft),
+            [workspaceRecoveryDraftStorageKey('project-one', 'chapter-two', ownWriterId)]: JSON.stringify({
+                ...ownDraft,
+                chapterId: 'chapter-two',
+            }),
+        });
+
+        const scan = scanWorkspaceRecoveryDrafts(storage, 'project-one', 'chapter-one');
+        assert.equal(scan.records.length, 3);
+        assert.equal(scan.invalid.length, 1);
+        assert.equal(scan.records[0].draft.writerId, foreignWriterId);
+        assert.equal(selectWorkspaceRecoveryDraft(scan.records, ownWriterId).draft.writerId, ownWriterId);
+        assert.equal(
+            selectWorkspaceRecoveryDraft(scan.records, 'writer-new-00000000000000001').draft.writerId,
+            foreignWriterId,
+        );
+    });
+
+    test('auto-restores only an exact draft owned by the current writer', () => {
+        const writerId = 'writer-own-00000000000000001';
+        const ownDraft = { writerId };
+        const foreignDraft = { writerId: 'writer-foreign-0000000000001' };
+        const legacyDraft = {};
+        assert.equal(
+            workspaceRecoveryDraftRestorePolicy(ownDraft, { writerId, exactAuthority: true }),
+            'auto',
+        );
+        assert.equal(
+            workspaceRecoveryDraftRestorePolicy(ownDraft, { writerId, exactAuthority: false }),
+            'confirm',
+        );
+        assert.equal(
+            workspaceRecoveryDraftRestorePolicy(foreignDraft, { writerId, exactAuthority: true }),
+            'confirm',
+        );
+        assert.equal(
+            workspaceRecoveryDraftRestorePolicy(legacyDraft, { writerId, exactAuthority: true }),
+            'confirm',
+        );
+    });
+
+    test('keeps the established earlier writer when duplicated tabs copy its session identity', () => {
+        const writerId = 'writer-shared-000000000000001';
+        const lowerInstanceId = 'instance-a-00000000000000001';
+        const higherInstanceId = 'instance-z-00000000000000001';
+        assert.equal(workspaceRecoveryWriterCollisionAction({
+            writerId,
+            instanceId: higherInstanceId,
+            established: true,
+            startedAt: 100,
+            remoteWriterId: writerId,
+            remoteInstanceId: lowerInstanceId,
+            remoteEstablished: false,
+            remoteStartedAt: 200,
+        }), 'keep');
+        assert.equal(workspaceRecoveryWriterCollisionAction({
+            writerId,
+            instanceId: lowerInstanceId,
+            established: false,
+            startedAt: 200,
+            remoteWriterId: writerId,
+            remoteInstanceId: higherInstanceId,
+            remoteEstablished: true,
+            remoteStartedAt: 100,
+        }), 'rotate');
+        assert.equal(workspaceRecoveryWriterCollisionAction({
+            writerId,
+            instanceId: higherInstanceId,
+            established: false,
+            startedAt: 100,
+            remoteWriterId: writerId,
+            remoteInstanceId: lowerInstanceId,
+            remoteEstablished: false,
+            remoteStartedAt: 200,
+        }), 'keep');
+        assert.equal(workspaceRecoveryWriterCollisionAction({
+            writerId,
+            instanceId: lowerInstanceId,
+            established: false,
+            startedAt: 200,
+            remoteWriterId: writerId,
+            remoteInstanceId: higherInstanceId,
+            remoteEstablished: false,
+            remoteStartedAt: 100,
+        }), 'rotate');
+        assert.equal(workspaceRecoveryWriterCollisionAction({
+            writerId,
+            instanceId: higherInstanceId,
+            established: false,
+            startedAt: 100,
+            remoteWriterId: writerId,
+            remoteInstanceId: lowerInstanceId,
+            remoteEstablished: false,
+            remoteStartedAt: 100,
+        }), 'rotate');
+        assert.equal(workspaceRecoveryWriterCollisionAction({
+            writerId,
+            instanceId: lowerInstanceId,
+            established: false,
+            startedAt: 100,
+            remoteWriterId: writerId,
+            remoteInstanceId: higherInstanceId,
+            remoteEstablished: false,
+            remoteStartedAt: 100,
+        }), 'keep');
+        assert.equal(workspaceRecoveryWriterCollisionAction({
+            writerId,
+            instanceId: lowerInstanceId,
+            established: true,
+            startedAt: 100,
+            remoteWriterId: 'writer-other-0000000000000001',
+            remoteInstanceId: higherInstanceId,
+            remoteEstablished: false,
+            remoteStartedAt: 200,
+        }), 'ignore');
+        assert.equal(workspaceRecoveryWriterCollisionAction({
+            writerId,
+            instanceId: lowerInstanceId,
+            established: true,
+            startedAt: 100,
+            remoteWriterId: writerId,
+            remoteInstanceId: lowerInstanceId,
+            remoteEstablished: false,
+            remoteStartedAt: 200,
+        }), 'ignore');
+    });
+
+    test('compare-and-remove preserves drafts changed during save and every foreign writer key', () => {
+        const ownKey = workspaceRecoveryDraftStorageKey(
+            'project-one',
+            'chapter-one',
+            'writer-own-00000000000000001',
+        );
+        const foreignKey = workspaceRecoveryDraftStorageKey(
+            'project-one',
+            'chapter-one',
+            'writer-foreign-0000000000001',
+        );
+        const storage = createMemoryStorage({
+            [ownKey]: 'own-before-save',
+            [foreignKey]: 'foreign-before-save',
+        });
+        const ownAtSaveStart = storage.getItem(ownKey);
+        storage.setItem(ownKey, 'own-updated-during-save');
+        assert.equal(
+            compareAndRemoveWorkspaceRecoveryDraft(storage, ownKey, ownAtSaveStart),
+            false,
+        );
+        assert.equal(storage.getItem(ownKey), 'own-updated-during-save');
+        assert.equal(storage.getItem(foreignKey), 'foreign-before-save');
+
+        const foreignAtRestore = storage.getItem(foreignKey);
+        storage.setItem(foreignKey, 'foreign-updated-before-authoritative-save');
+        assert.equal(
+            compareAndRemoveWorkspaceRecoveryDraft(storage, foreignKey, foreignAtRestore),
+            false,
+        );
+        assert.equal(storage.getItem(foreignKey), 'foreign-updated-before-authoritative-save');
+        assert.equal(
+            compareAndRemoveWorkspaceRecoveryDraft(storage, ownKey, 'own-updated-during-save'),
+            true,
+        );
+        assert.equal(storage.getItem(ownKey), null);
+        assert.equal(storage.getItem(foreignKey), 'foreign-updated-before-authoritative-save');
+    });
+
+    test('rechecks a CAS-mismatched recovery draft before skipping its storage key', () => {
+        const record = { storageKey: 'draft-key', raw: 'already-applied' };
+        const updated = { storageKey: 'draft-key', raw: 'new-unsaved-content' };
+        assert.equal(workspaceRecoveryDraftCleanupDecision(record, true, null), 'removed');
+        assert.equal(workspaceRecoveryDraftCleanupDecision(record, false, updated), 'updated');
+        assert.equal(
+            workspaceRecoveryDraftCleanupDecision(record, false, { ...record }),
+            'skip',
+        );
+        assert.equal(
+            workspaceRecoveryDraftCleanupDecision(
+                record,
+                false,
+                { storageKey: 'another-key', raw: 'new-unsaved-content' },
+            ),
+            'skip',
+        );
+    });
+
+    test('detects recovery drafts already persisted by a lifecycle keepalive save', () => {
+        const draft = normalizeWorkspaceRecoveryDraft({
+            version: 1,
+            projectId: 'project-one',
+            projectVersion: 7,
+            chapterId: 'chapter-one',
+            chapterRevision: 3,
+            volumeId: 'volume-one',
+            volumeRevision: 2,
+            projectDirtyPaths: ['story.premise'],
+            chapterDirtyPaths: ['content'],
+            volumeDirtyFields: ['title'],
+            projectChanges: { story: { premise: '本地命题' } },
+            chapterChanges: { content: '未保存正文' },
+            volumeChanges: { title: '本地卷名' },
+        });
+        const project = {
+            id: 'project-one',
+            story: { premise: '本地命题' },
+        };
+        const chapter = { id: 'chapter-one', content: '未保存正文' };
+        const volume = { id: 'volume-one', title: '本地卷名' };
+        assert.equal(workspaceRecoveryDraftAlreadyApplied(draft, { project, chapter, volume }), true);
+        assert.equal(workspaceRecoveryDraftAlreadyApplied(
+            draft,
+            { project, chapter: { ...chapter, content: '服务端旧正文' }, volume },
+        ), false);
+    });
+
+    test('keeps authority-mutating workspaces active while blocking navigation into editable views', () => {
+        assert.equal(workspaceAuthorityMutationAllowsView('', 'write'), true);
+        assert.equal(workspaceAuthorityMutationAllowsView('workflow', 'workflow'), true);
+        assert.equal(workspaceAuthorityMutationAllowsView('workflow', 'write'), false);
+        assert.equal(workspaceAuthorityMutationAllowsView('quality', 'resources'), false);
+    });
+
+    test('persists authoring recovery synchronously and retries on mobile lifecycle changes', () => {
+        const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+        const recoverySource = app.slice(
+            app.indexOf('function createWorkspaceRecoveryIdentity'),
+            app.indexOf('function qualityChapterPath'),
+        );
+        assert.match(app, /function persistWorkspaceRecoveryDraft\(/);
+        assert.match(app, /window\.sessionStorage\.getItem\(WORKSPACE_RECOVERY_WRITER_STORAGE_KEY\)/);
+        assert.match(app, /new globalThis\.BroadcastChannel\(\s*WORKSPACE_RECOVERY_WRITER_CHANNEL_NAME,/);
+        assert.match(app, /window\.addEventListener\('storage'/);
+        assert.match(app, /workspaceRecoveryWriterCollisionAction\(/);
+        assert.match(app, /established:\s*workspaceRecoveryWriterEstablished/);
+        assert.match(app, /startedAt:\s*workspaceRecoveryWriterStartedAt/);
+        assert.match(app, /workspaceRecoveryWriterEstablished = true;\s*postWorkspaceRecoveryWriterMessage\('claim'\)/);
+        assert.match(app, /await workspaceRecoveryWriterLeaseReady;/);
+        assert.match(app, /workspaceRecoveryDraftStorageKey\(\s*draft\.projectId,\s*draft\.chapterId,\s*workspaceRecoveryWriterId,/);
+        assert.match(app, /window\.localStorage\.setItem\(storageKey,\s*raw\)/);
+        assert.match(recoverySource, /scanWorkspaceRecoveryDrafts\(/);
+        assert.match(recoverySource, /excludedStorageKeys\.has\(record\.storageKey\)/);
+        assert.match(recoverySource, /workspaceRecoveryDraftRestorePolicy\(/);
+        assert.match(
+            recoverySource,
+            /while \(record && workspaceRecoveryDraftAlreadyApplied\(record\.draft,[\s\S]*workspaceRecoveryDraftCleanupDecision\([\s\S]*cleanupDecision === 'updated'[\s\S]*cleanupDecision === 'skip'\) skippedStorageKeys\.add\(record\.storageKey\);[\s\S]*readWorkspaceRecoveryDraft\(project\.id, chapter\.id, skippedStorageKeys\);/,
+        );
+        assert.match(recoverySource, /foreignDraft[\s\S]*window\.confirm\(confirmationMessage\)/);
+        assert.doesNotMatch(recoverySource, /window\.localStorage\.removeItem\(record\.storageKey\)/);
+        assert.match(app, /function restoreWorkspaceRecoveryDraft\(/);
+        assert.match(app, /restoreWorkspaceRecoveryDraft\(project,\s*chapter\)/);
+        const loadChapterSource = app.slice(
+            app.indexOf('async function loadChapter('),
+            app.indexOf('async function exportProject('),
+        );
+        assert.match(loadChapterSource, /restoredWorkspaceRecoverySource = null;/);
+        assert.match(loadChapterSource, /restoreWorkspaceRecoveryDraft\(state\.project,\s*chapter\)/);
+        assert.match(app, /const recoveryDraftAtSaveStart = workspaceRecoveryDraftRecordForWriter\(/);
+        assert.match(app, /removeWorkspaceRecoveryDraftRecord\(recoveryDraftAtSaveStart\)/);
+        assert.match(app, /const restoredRecoverySourceAtSaveStart = restoredWorkspaceRecoverySource/);
+        assert.match(app, /removeWorkspaceRecoveryDraftRecord\(restoredRecoverySourceAtSaveStart\)/);
+        assert.match(app, /document\.addEventListener\('visibilitychange'/);
+        assert.match(app, /window\.addEventListener\('pagehide',\s*persistLifecycleRecoveryDraft\)/);
+        assert.match(app, /keepalive:\s*true/);
+        assert.match(
+            recoverySource,
+            /projectVersion:\s*optimisticTokenFor\(state\.projectBase,\s*state\.project,\s*'version'\)/,
+        );
+        assert.match(
+            recoverySource,
+            /revision:\s*optimisticTokenFor\(state\.chapterBase,\s*state\.chapter,\s*'revision'\)/,
+        );
+    });
+
+    test('guards authority mutations and preserves edits made while refreshed authority is pending', () => {
+        const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+        assert.match(app, /beginAuthorityMutation\('workflow'\)/);
+        assert.match(app, /beginAuthorityMutation\('quality'\)/);
+        assert.match(app, /beginAuthorityMutation\('resources'\)/);
+        assert.match(app, /workspaceAuthorityMutationAllowsView\(authorityMutationView\(\),\s*view\)/);
+        assert.match(app, /button\.disabled = authorityMutationLocked\(\)/);
+        const workflowCommand = app.slice(
+            app.indexOf('async function sendWorkflowCommand('),
+            app.indexOf('async function cancelWorkflowRun('),
+        );
+        assert.ok(
+            workflowCommand.indexOf("beginAuthorityMutation('workflow')")
+                < workflowCommand.indexOf('await enqueueSave()'),
+        );
+
+        const workflowRefresh = app.slice(
+            app.indexOf('async function refreshWorkflowAuthority('),
+            app.indexOf('async function sendWorkflowCommand('),
+        );
+        assert.match(workflowRefresh, /acceptServerProject\(project\);/);
+        assert.match(workflowRefresh, /acceptServerChapter\(chapter\);/);
+        assert.match(workflowRefresh, /scheduleAutosave\(\);/);
+        assert.doesNotMatch(workflowRefresh, /acceptServer(Project|Chapter)\([^)]*new Set\(\)/);
+
+        const qualityCopy = app.slice(
+            app.indexOf('async function copyQualityProfile('),
+            app.indexOf('async function previewCurrentChapterQuality('),
+        );
+        assert.match(qualityCopy, /acceptServerProject\(result\.project\);/);
+        assert.doesNotMatch(qualityCopy, /acceptServerProject\([^)]*new Set\(\)/);
+
+        const resourceMutation = app.slice(
+            app.indexOf('async function refreshAfterResourceConflict('),
+            app.indexOf('async function updateResourceActivation('),
+        );
+        assert.match(resourceMutation, /acceptServerProject\(project\);/);
+        assert.match(resourceMutation, /acceptServerProject\(result\.project\);/);
+        assert.doesNotMatch(resourceMutation, /acceptServerProject\([^)]*new Set\(\)/);
+    });
+
     test('keeps the mobile drawer scrim pinned to the viewport', () => {
         const style = fs.readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
         const drawerRule = style.match(/\.ss-drawer-scrim\s*\{([^}]*)\}/)?.[1] ?? '';
@@ -671,6 +1128,173 @@ describe('standalone frontend core compatibility', () => {
             story: { premise: '本地命题', world: '远端世界' },
         });
         assert.deepEqual(findConflictingPaths(base, remote, local, ['genre', 'story.premise']), []);
+    });
+
+    test('preserves queued and in-flight fields while merging a newer authority snapshot', () => {
+        const paths = combineFieldPaths(
+            new Set(['story.premise']),
+            new Set(['title']),
+            false,
+            null,
+        );
+        assert.deepEqual([...paths], ['story.premise', 'title']);
+
+        const remoteProject = {
+            title: '远端标题',
+            story: { premise: '远端命题', outline: '远端总纲' },
+        };
+        const localProject = {
+            title: '保存中的标题',
+            story: { premise: '排队中的命题', outline: '本地旧总纲' },
+        };
+        assert.deepEqual(mergeProjectDirtyPaths(remoteProject, localProject, paths), {
+            title: '保存中的标题',
+            story: { premise: '排队中的命题', outline: '远端总纲' },
+            continuity: [],
+        });
+
+        assert.deepEqual(
+            mergeDirtyPaths(
+                { title: '远端章名', content: '远端正文' },
+                { title: '保存中的章名', content: '本地待保存正文' },
+                combineFieldPaths([], ['content']),
+            ),
+            { title: '远端章名', content: '本地待保存正文' },
+        );
+    });
+
+    test('retains pre-refresh conflict values and optimistic tokens for preserved edits', () => {
+        const projectPaths = combineFieldPaths(
+            new Set(['story.premise']),
+            new Set(['title']),
+        );
+        const projectBase = {
+            id: 'project-1',
+            version: 1,
+            title: '旧标题',
+            story: { premise: '旧命题', outline: '旧总纲' },
+            continuity: [],
+        };
+        const remoteProject = {
+            id: 'project-1',
+            version: 2,
+            title: '远端标题',
+            story: { premise: 'Workflow 命题', outline: '远端总纲' },
+            continuity: [],
+        };
+        const localProject = mergeProjectDirtyPaths(remoteProject, {
+            ...structuredClone(projectBase),
+            title: '保存中的标题',
+            story: { ...projectBase.story, premise: '本地命题' },
+        }, projectPaths);
+        const preservedProjectBase = mergeProjectDirtyPaths(
+            remoteProject,
+            projectBase,
+            combineFieldPaths(projectPaths, ['version']),
+        );
+        assert.equal(preservedProjectBase.version, 1);
+        assert.equal(preservedProjectBase.title, '旧标题');
+        assert.equal(preservedProjectBase.story.premise, '旧命题');
+        assert.equal(preservedProjectBase.story.outline, '远端总纲');
+        assert.deepEqual(
+            findConflictingPaths(preservedProjectBase, remoteProject, localProject, projectPaths),
+            ['story.premise', 'title'],
+        );
+
+        const chapterPaths = combineFieldPaths(
+            new Set(['content']),
+            new Set(['title']),
+        );
+        const chapterBase = {
+            id: 'chapter-1',
+            revision: 1,
+            title: '旧章名',
+            content: '旧正文',
+        };
+        const remoteChapter = {
+            id: 'chapter-1',
+            revision: 2,
+            title: '远端章名',
+            content: 'Workflow 正文',
+        };
+        const localChapter = mergeDirtyPaths(remoteChapter, {
+            ...chapterBase,
+            title: '保存中的章名',
+            content: '本地正文',
+        }, chapterPaths);
+        const preservedChapterBase = mergeDirtyPaths(
+            remoteChapter,
+            chapterBase,
+            combineFieldPaths(chapterPaths, ['revision']),
+        );
+        assert.equal(preservedChapterBase.revision, 1);
+        assert.equal(preservedChapterBase.content, '旧正文');
+        assert.equal(preservedChapterBase.title, '旧章名');
+        assert.deepEqual(
+            findConflictingPaths(preservedChapterBase, remoteChapter, localChapter, chapterPaths),
+            ['content', 'title'],
+        );
+    });
+
+    test('wires in-flight autosave fields into recovery drafts and authority merges', () => {
+        const app = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+        assert.match(app, /projectSavingPaths:\s*new Set\(\)/);
+        assert.match(app, /chapterSavingPaths:\s*new Set\(\)/);
+        assert.match(app, /volumeSavingFields:\s*new Set\(\)/);
+        assert.match(app, /combineFieldPaths\(\s*state\.projectDirtyPaths,\s*state\.projectSavingPaths,/);
+        assert.match(app, /mergeProjectAuthoritySnapshot\(\{[\s\S]*relatedPending:\s*preservedVolumes\.size > 0,/);
+        assert.match(app, /mergeChapterAuthoritySnapshot\(\{/);
+        assert.match(app, /advanceBaseline:\s*advancePreservedBase,/);
+        assert.match(app, /classifyConflictPaths\(\{/);
+
+        const flushSource = app.slice(
+            app.indexOf('async function flushDirtyImpl('),
+            app.indexOf('async function flushDirty('),
+        );
+        assert.match(flushSource, /beginSaveBatch\(state\.projectDirtyPaths\)/);
+        assert.match(flushSource, /beginSaveBatch\(state\.volumeDirtyFields\)/);
+        assert.match(flushSource, /beginSaveBatch\(state\.chapterDirtyPaths\)/);
+        assert.match(flushSource, /state\.projectDirtyPaths = rollbackSaveBatch\(state\.projectDirtyPaths,\s*dirtyPaths\)/);
+        assert.match(flushSource, /state\.volumeDirtyFields = rollbackSaveBatch\(state\.volumeDirtyFields,\s*dirtyFields\)/);
+        assert.match(flushSource, /state\.chapterDirtyPaths = rollbackSaveBatch\(state\.chapterDirtyPaths,\s*dirtyPaths\)/);
+        assert.match(flushSource, /optimisticTokenFor\(state\.projectBase,\s*state\.project,\s*'version'\)/);
+        assert.match(flushSource, /optimisticTokenFor\(state\.volumeBase,\s*volume,\s*'revision'\)/);
+        assert.match(flushSource, /optimisticTokenFor\(state\.chapterBase,\s*state\.chapter,\s*'revision'\)/);
+        assert.match(flushSource, /buildProjectChanges\(state\.project,\s*dirtyPaths\)/);
+        assert.match(flushSource, /buildRecordChanges\(state\.chapter,\s*dirtyPaths\)/);
+        assert.equal(
+            (flushSource.match(/authorityResponseTokenIsStale\(/g) || []).length,
+            5,
+        );
+        assert.match(
+            flushSource,
+            /authorityResponseTokenIsStale\(serverProject,\s*state\.project,\s*'version'\)[\s\S]*state\.projectDirtyPaths = rollbackSaveBatch\([\s\S]*resolveProjectConflict\(projectId\)/,
+        );
+        assert.match(
+            flushSource,
+            /authorityResponseTokenIsStale\(responseVolume,\s*currentVolume,\s*'revision'\)[\s\S]*state\.volumeDirtyFields = rollbackSaveBatch\([\s\S]*resolveVolumeConflict\(projectId\)/,
+        );
+        assert.match(
+            flushSource,
+            /authorityResponseTokenIsStale\(result\.chapter,\s*state\.chapter,\s*'revision'\)[\s\S]*state\.chapterDirtyPaths = rollbackSaveBatch\([\s\S]*resolveChapterConflict\(projectId,\s*chapterId\)/,
+        );
+        assert.match(app, /acceptServerProject\(remoteProject,\s*state\.projectDirtyPaths,\s*\{\s*advancePreservedBase: true,/);
+        assert.match(app, /acceptServerChapter\(remoteChapter,\s*state\.chapterDirtyPaths,\s*\{\s*advancePreservedBase: true,/);
+
+        const chapterConflict = app.slice(
+            app.indexOf('async function resolveChapterConflict('),
+            app.indexOf('function reconcileVolumeConflict('),
+        );
+        assert.match(chapterConflict, /\/authority/);
+        assert.doesNotMatch(chapterConflict, /Promise\.all\(/);
+
+        const workflowRefresh = app.slice(
+            app.indexOf('async function refreshWorkflowAuthority('),
+            app.indexOf('async function sendWorkflowCommand('),
+        );
+        assert.match(workflowRefresh, /\/authority/);
+        assert.doesNotMatch(workflowRefresh, /Promise\.all\(/);
+        assert.match(workflowRefresh, /hasSavingEdits[\s\S]*setSaveStatus\('保存中', 'saving'\)/);
     });
 
     test('reports only dirty paths changed differently on both sides', () => {

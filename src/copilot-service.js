@@ -16,6 +16,7 @@ const SESSION_FIELDS = Object.freeze([
     'commandId', 'projectVersion', 'anchorChapterId', 'selection', 'retrieval', 'contextDigest',
     'selectedEvidenceIds', 'profileRef', 'optionCount', 'instruction',
 ]);
+const RECONCILE_FIELDS = Object.freeze([]);
 const GENERATE_FIELDS = Object.freeze(['commandId', 'sessionRevision']);
 const CANCEL_FIELDS = Object.freeze(['commandId', 'sessionRevision']);
 const SELECTION_FIELDS = Object.freeze(['volumeIds', 'chapterIds', 'entityIds', 'lorebookIds']);
@@ -795,7 +796,7 @@ export class CopilotService {
     publicSession(session, extra = {}) {
         let stale = false;
         try {
-            stale = this.storyStore.getProject(session.projectId).version !== session.base.projectVersion;
+            stale = this.storyStore.getProjectVersionReadOnly(session.projectId) !== session.base.projectVersion;
         } catch {
             stale = true;
         }
@@ -829,25 +830,30 @@ export class CopilotService {
     }
 
     listSessions(projectId) {
+        this.storyStore.assertProjectExistsReadOnly(projectId);
+        return this.copilotStore.listSessions(projectId);
+    }
+
+    reconcileSessions(projectId, body) {
+        assertKnownFields(body, RECONCILE_FIELDS, 'Copilot reconciliation request', RECONCILE_FIELDS);
         this.storyStore.getProject(projectId);
-        let listed = this.copilotStore.listSessions(projectId);
-        let recovered = false;
+        const listed = this.copilotStore.listSessions(projectId);
+        const recoveredSessionIds = [];
         for (const summary of listed.sessions) {
             if (summary.status !== 'generating' || this.inflight.has(`${projectId}:${summary.id}`)) continue;
-            this.copilotStore.recoverInterrupted(projectId, summary.id);
-            recovered = true;
+            const recovered = this.copilotStore.recoverInterrupted(projectId, summary.id);
+            if (recovered.status !== 'generating') recoveredSessionIds.push(summary.id);
         }
-        if (recovered) listed = this.copilotStore.listSessions(projectId);
-        return listed;
+        return {
+            ...this.copilotStore.listSessions(projectId),
+            recoveredSessionIds,
+        };
     }
 
     getSession(projectId, sessionId) {
-        const key = `${projectId}:${sessionId}`;
+        this.storyStore.assertProjectExistsReadOnly(projectId);
         const session = this.copilotStore.getSession(projectId, sessionId);
-        const recovered = session.status === 'generating' && !this.inflight.has(key)
-            ? this.copilotStore.recoverInterrupted(projectId, sessionId)
-            : session;
-        return this.publicSession(recovered);
+        return this.publicSession(session);
     }
 
     async generateSession(projectId, sessionId, body, callbacks = {}) {

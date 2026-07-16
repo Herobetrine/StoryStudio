@@ -43,6 +43,61 @@ afterEach(() => {
 });
 
 describe('local HTTP security and Story Studio API', () => {
+    test('rejects a missing data root below an existing linked ancestor', () => {
+        const container = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-linked-data-parent-'));
+        const external = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-linked-data-parent-target-'));
+        const linkedParent = path.join(container, 'linked-parent');
+        const dataRoot = path.join(linkedParent, 'data');
+        fs.writeFileSync(path.join(external, 'marker.txt'), 'unchanged', 'utf8');
+        fs.symlinkSync(
+            external,
+            linkedParent,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        try {
+            assert.throws(
+                () => createApp({ dataRoot }),
+                error => error?.status === 500 && error?.code === 'unsafe_provider_path',
+            );
+            assert.deepEqual(fs.readdirSync(external), ['marker.txt']);
+        } finally {
+            try {
+                fs.unlinkSync(linkedParent);
+            } catch {
+                // Preserve the original assertion if setup did not reach link creation.
+            }
+            fs.rmSync(container, { recursive: true, force: true });
+            fs.rmSync(external, { recursive: true, force: true });
+        }
+    });
+
+    test('rejects a linked top-level data root before child stores touch its target', () => {
+        const container = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-linked-data-root-'));
+        const external = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-linked-data-target-'));
+        const linkedDataRoot = path.join(container, 'data');
+        fs.writeFileSync(path.join(external, 'marker.txt'), 'unchanged', 'utf8');
+        fs.symlinkSync(
+            external,
+            linkedDataRoot,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        try {
+            assert.throws(
+                () => createApp({ dataRoot: linkedDataRoot }),
+                error => error?.status === 500 && error?.code === 'unsafe_provider_path',
+            );
+            assert.deepEqual(fs.readdirSync(external), ['marker.txt']);
+        } finally {
+            try {
+                fs.unlinkSync(linkedDataRoot);
+            } catch {
+                // Preserve the original assertion if setup did not reach link creation.
+            }
+            fs.rmSync(container, { recursive: true, force: true });
+            fs.rmSync(external, { recursive: true, force: true });
+        }
+    });
+
     test('bootstrap returns a process CSRF token and hardened headers', async () => {
         const response = await request(app).get('/api/bootstrap').set('Host', LOCAL_HOST).expect(200);
         assert.equal(response.body.name, 'Story Studio');
@@ -126,6 +181,38 @@ describe('local HTTP security and Story Studio API', () => {
         assert.equal(conflict.body.error, 'chapter_conflict');
         assert.equal(conflict.body.currentRevision, 2);
         assert.equal(conflict.body.currentProjectVersion, 2);
+    });
+
+    test('returns one coherent read-only project and chapter authority snapshot', async () => {
+        const csrfToken = await csrfFor();
+        const created = await request(app)
+            .post('/api/story-studio/projects')
+            .set('Host', LOCAL_HOST)
+            .set('X-CSRF-Token', csrfToken)
+            .send({ title: '权威快照' })
+            .expect(201);
+        const saved = await request(app)
+            .patch(`/api/story-studio/projects/${created.body.project.id}/chapters/${created.body.chapter.id}`)
+            .set('Host', LOCAL_HOST)
+            .set('X-CSRF-Token', csrfToken)
+            .send({
+                projectVersion: created.body.project.version,
+                revision: created.body.chapter.revision,
+                changes: { title: '同步章名', content: '同步后的正文。' },
+            })
+            .expect(200);
+
+        const snapshot = await request(app)
+            .get(`/api/story-studio/projects/${created.body.project.id}/chapters/${created.body.chapter.id}/authority`)
+            .set('Host', LOCAL_HOST)
+            .expect(200);
+        assert.equal(snapshot.body.project.version, saved.body.project.version);
+        assert.equal(snapshot.body.chapter.revision, saved.body.chapter.revision);
+        assert.equal(snapshot.body.chapter.title, '同步章名');
+        assert.deepEqual(
+            snapshot.body.project.chapters.find(item => item.id === snapshot.body.chapter.id),
+            saved.body.project.chapters.find(item => item.id === saved.body.chapter.id),
+        );
     });
 
     test('roundtrips a project through the export and import routes', async () => {
@@ -441,6 +528,38 @@ describe('provider settings and OpenAI-compatible generation', () => {
         assert.equal(response.body.message, 'Invalid API key');
         assert.equal(response.body.upstreamStatus, 401);
         assert.equal(calls, 1);
+    });
+
+    test('redacts a server-only API key reflected by an upstream error', async () => {
+        const apiKey = 'SERVER_ONLY_REFLECTED_KEY_FIXTURE';
+        app = createApp({
+            dataRoot,
+            fetchImplementation: async () => jsonResponse({
+                error: {
+                    message: `Authorization failed for Bearer ${apiKey}; key=${apiKey}`,
+                },
+            }, 401),
+        });
+        const csrfToken = await csrfFor();
+        await putProvider(app, csrfToken, {
+            baseUrl: 'https://models.example/v1',
+            model: 'writer-model',
+            apiKey,
+        });
+
+        const response = await request(app)
+            .post('/api/generate')
+            .set('Host', LOCAL_HOST)
+            .set('X-CSRF-Token', csrfToken)
+            .send({ prompt: '写一段正文。' })
+            .expect(502);
+
+        assert.equal(response.body.error, 'provider_http_error');
+        assert.equal(response.body.message.includes(apiKey), false);
+        assert.equal(
+            response.body.message,
+            'Authorization failed for Bearer [REDACTED]; key=[REDACTED]',
+        );
     });
 
     test('reports unreachable providers without leaking internal errors', async () => {

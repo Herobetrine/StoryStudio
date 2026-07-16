@@ -1,18 +1,38 @@
 import {
+    compareAndRemoveWorkspaceRecoveryDraft,
+    combineFieldPaths,
     continuityView,
     buildGenerationRequest,
     countContentUnits,
-    findConflictingPaths,
-    getValueAtPath,
-    isContinuityPath,
+    isWorkspaceRecoveryDraftIdentity,
     mergeDirtyPaths,
     mergeProjectDirtyPaths,
+    normalizeWorkspaceRecoveryDraft,
     parseStructuredResponse,
     pendingChangeSetDraftStorageKey,
     pendingChangeSetNavigationPolicy,
     safeFileName,
+    scanWorkspaceRecoveryDrafts,
+    selectWorkspaceRecoveryDraft,
     validatePendingChangeSetValue,
+    workspaceRecoveryDraftAlreadyApplied,
+    workspaceRecoveryDraftCleanupDecision,
+    workspaceRecoveryDraftRestorePolicy,
+    workspaceRecoveryDraftStorageKey,
+    workspaceRecoveryWriterCollisionAction,
+    workspaceAuthorityMutationAllowsView,
 } from './core.js';
+import {
+    authorityResponseTokenIsStale,
+    beginSaveBatch,
+    buildProjectChanges,
+    buildRecordChanges,
+    classifyConflictPaths,
+    mergeChapterAuthoritySnapshot,
+    mergeProjectAuthoritySnapshot,
+    optimisticTokenFor,
+    rollbackSaveBatch,
+} from './save-state.js';
 import {
     buildVolumeTree,
     isChapterPlanStale,
@@ -46,8 +66,18 @@ import {
 const API_ROOT = '/api/story-studio';
 const AUTOSAVE_DELAY = 700;
 const WORKSPACE_RESUME_STORAGE_KEY = 'story-studio.workspace-resume.v1';
+const WORKSPACE_RECOVERY_WRITER_STORAGE_KEY = 'story-studio.workspace-recovery-writer.v1';
+const WORKSPACE_RECOVERY_WRITER_CHANNEL_NAME = 'story-studio.workspace-recovery-writer.channel.v1';
+const WORKSPACE_RECOVERY_WRITER_SIGNAL_KEY = 'story-studio.workspace-recovery-writer.signal.v1';
+const WORKSPACE_RECOVERY_WRITER_SETTLE_MS = 80;
 const MAX_CONFLICT_RETRIES = 3;
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
+let workspaceRecoveryWriterChannel = null;
+let workspaceRecoveryWriterId = loadWorkspaceRecoveryWriterId();
+const workspaceRecoveryWriterInstanceId = createWorkspaceRecoveryIdentity();
+const workspaceRecoveryWriterStartedAt = Date.now();
+let workspaceRecoveryWriterEstablished = false;
+const workspaceRecoveryWriterLeaseReady = initializeWorkspaceRecoveryWriterLease();
 
 const CARD_FIELDS = [
     'summary',
@@ -318,6 +348,10 @@ const state = {
     chapterDirtyPaths: new Set(),
     volumeDirtyFields: new Set(),
     volumeDirtyId: '',
+    projectSavingPaths: new Set(),
+    chapterSavingPaths: new Set(),
+    volumeSavingFields: new Set(),
+    volumeSavingId: '',
     projectBase: null,
     chapterBase: null,
     volumeBase: null,
@@ -327,6 +361,8 @@ const state = {
     saveInFlight: false,
     mutationInFlight: 0,
     navigationBusy: false,
+    authorityMutation: null,
+    authorityMutationSerial: 0,
     structureBusy: false,
     navigationEpoch: 0,
     generations: [],
@@ -339,6 +375,8 @@ const state = {
     selectionBaseline: null,
     generationController: null,
     generationRequestSerial: 0,
+    contextPreviewController: null,
+    contextPreviewRequestSerial: 0,
     distilling: false,
     adopting: false,
     resources: [],
@@ -463,6 +501,9 @@ let toastTimer = null;
 let mobileMedia = null;
 let providerLastFocus = null;
 let providerOpenEpoch = 0;
+let recoveryDraftStorageWarningShown = false;
+let lifecycleRecoveryFlushSignature = '';
+let restoredWorkspaceRecoverySource = null;
 
 class ApiError extends Error {
     constructor(message, status, data = {}) {
@@ -615,6 +656,364 @@ function restoreWorkspaceResumeState(resume) {
         });
     }
     return true;
+}
+
+function createWorkspaceRecoveryIdentity() {
+    const uuid = globalThis.crypto?.randomUUID?.();
+    if (isWorkspaceRecoveryDraftIdentity(uuid)) return uuid;
+    if (globalThis.crypto?.getRandomValues) {
+        const bytes = new Uint8Array(16);
+        globalThis.crypto.getRandomValues(bytes);
+        const randomId = [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
+        if (isWorkspaceRecoveryDraftIdentity(randomId)) return randomId;
+    }
+    return `recovery-${Date.now().toString(36)}-${Math.random().toString(36).slice(2).padEnd(16, '0')}`;
+}
+
+function loadWorkspaceRecoveryWriterId() {
+    try {
+        const stored = window.sessionStorage.getItem(WORKSPACE_RECOVERY_WRITER_STORAGE_KEY);
+        if (isWorkspaceRecoveryDraftIdentity(stored)) return stored;
+        const writerId = createWorkspaceRecoveryIdentity();
+        window.sessionStorage.setItem(WORKSPACE_RECOVERY_WRITER_STORAGE_KEY, writerId);
+        return writerId;
+    } catch {
+        return createWorkspaceRecoveryIdentity();
+    }
+}
+
+function persistWorkspaceRecoveryWriterId() {
+    try {
+        window.sessionStorage.setItem(
+            WORKSPACE_RECOVERY_WRITER_STORAGE_KEY,
+            workspaceRecoveryWriterId,
+        );
+    } catch {
+        // The in-memory writer identity still isolates this live page.
+    }
+}
+
+function workspaceRecoveryWriterMessage(type) {
+    return {
+        type,
+        writerId: workspaceRecoveryWriterId,
+        instanceId: workspaceRecoveryWriterInstanceId,
+        established: workspaceRecoveryWriterEstablished,
+        startedAt: workspaceRecoveryWriterStartedAt,
+    };
+}
+
+function postWorkspaceRecoveryWriterMessage(type) {
+    const message = workspaceRecoveryWriterMessage(type);
+    if (workspaceRecoveryWriterChannel) {
+        workspaceRecoveryWriterChannel.postMessage(message);
+        return;
+    }
+    try {
+        window.localStorage.setItem(WORKSPACE_RECOVERY_WRITER_SIGNAL_KEY, JSON.stringify({
+            ...message,
+            nonce: createWorkspaceRecoveryIdentity(),
+        }));
+        window.localStorage.removeItem(WORKSPACE_RECOVERY_WRITER_SIGNAL_KEY);
+    } catch {
+        // Cross-tab collision detection is best-effort when browser messaging is unavailable.
+    }
+}
+
+function rotateWorkspaceRecoveryWriterId() {
+    const previousWriterId = workspaceRecoveryWriterId;
+    do {
+        workspaceRecoveryWriterId = createWorkspaceRecoveryIdentity();
+    } while (workspaceRecoveryWriterId === previousWriterId);
+    persistWorkspaceRecoveryWriterId();
+    postWorkspaceRecoveryWriterMessage('claim');
+    queueMicrotask(() => {
+        if (state.projectDirty || state.chapterDirty || state.volumeDirty) {
+            persistWorkspaceRecoveryDraft();
+        }
+    });
+}
+
+function handleWorkspaceRecoveryWriterMessage(message) {
+    if (!message || !['probe', 'claim'].includes(message.type)) return;
+    const action = workspaceRecoveryWriterCollisionAction({
+        writerId: workspaceRecoveryWriterId,
+        instanceId: workspaceRecoveryWriterInstanceId,
+        established: workspaceRecoveryWriterEstablished,
+        startedAt: workspaceRecoveryWriterStartedAt,
+        remoteWriterId: message.writerId,
+        remoteInstanceId: message.instanceId,
+        remoteEstablished: message.established,
+        remoteStartedAt: message.startedAt,
+    });
+    if (action === 'rotate') {
+        rotateWorkspaceRecoveryWriterId();
+    } else if (action === 'keep' && message.type === 'probe') {
+        postWorkspaceRecoveryWriterMessage('claim');
+    }
+}
+
+function initializeWorkspaceRecoveryWriterLease() {
+    if (typeof globalThis.BroadcastChannel === 'function') {
+        try {
+            workspaceRecoveryWriterChannel = new globalThis.BroadcastChannel(
+                WORKSPACE_RECOVERY_WRITER_CHANNEL_NAME,
+            );
+            workspaceRecoveryWriterChannel.addEventListener('message', event => {
+                handleWorkspaceRecoveryWriterMessage(event.data);
+            });
+        } catch {
+            workspaceRecoveryWriterChannel = null;
+        }
+    }
+    if (!workspaceRecoveryWriterChannel) {
+        window.addEventListener('storage', event => {
+            if (event.key !== WORKSPACE_RECOVERY_WRITER_SIGNAL_KEY || !event.newValue) return;
+            try {
+                handleWorkspaceRecoveryWriterMessage(JSON.parse(event.newValue));
+            } catch {
+                // Ignore malformed cross-tab coordination messages.
+            }
+        });
+    }
+    postWorkspaceRecoveryWriterMessage('probe');
+    return new Promise(resolve => {
+        window.setTimeout(() => {
+            workspaceRecoveryWriterEstablished = true;
+            postWorkspaceRecoveryWriterMessage('claim');
+            resolve();
+        }, WORKSPACE_RECOVERY_WRITER_SETTLE_MS);
+    });
+}
+
+function currentWorkspaceRecoveryDraft() {
+    if (!state.project?.id || !state.chapter?.id) return null;
+    const projectDirtyPaths = [...combineFieldPaths(
+        state.projectDirtyPaths,
+        state.projectSavingPaths,
+    )];
+    const chapterDirtyPaths = [...combineFieldPaths(
+        state.chapterDirtyPaths,
+        state.chapterSavingPaths,
+    )];
+    const volumeDirtyFields = [...combineFieldPaths(
+        state.volumeDirtyFields,
+        state.volumeSavingFields,
+    )];
+    if (projectDirtyPaths.length === 0 && chapterDirtyPaths.length === 0 && volumeDirtyFields.length === 0) {
+        return null;
+    }
+    const volumeId = state.volumeDirtyId || state.volumeSavingId;
+    const volume = volumeId ? volumeById(state.project, volumeId) : null;
+    return normalizeWorkspaceRecoveryDraft({
+        version: 1,
+        writerId: workspaceRecoveryWriterId,
+        draftId: createWorkspaceRecoveryIdentity(),
+        projectId: state.project.id,
+        projectVersion: state.project.version,
+        chapterId: state.chapter.id,
+        chapterRevision: state.chapter.revision,
+        volumeId: volume?.id || '',
+        volumeRevision: volume?.revision ?? null,
+        projectDirtyPaths,
+        chapterDirtyPaths,
+        volumeDirtyFields,
+        projectChanges: buildProjectChanges(state.project, projectDirtyPaths),
+        chapterChanges: buildRecordChanges(state.chapter, chapterDirtyPaths),
+        volumeChanges: volume
+            ? Object.fromEntries(volumeDirtyFields.map(field => [field, volume[field]]))
+            : {},
+        updatedAt: new Date().toISOString(),
+    }, {
+        projectId: state.project.id,
+        chapterId: state.chapter.id,
+    });
+}
+
+function persistWorkspaceRecoveryDraft() {
+    const draft = currentWorkspaceRecoveryDraft();
+    if (!draft) return null;
+    const storageKey = workspaceRecoveryDraftStorageKey(
+        draft.projectId,
+        draft.chapterId,
+        workspaceRecoveryWriterId,
+    );
+    const raw = JSON.stringify(draft);
+    try {
+        window.localStorage.setItem(storageKey, raw);
+        recoveryDraftStorageWarningShown = false;
+        return { storageKey, raw, draft };
+    } catch {
+        if (!recoveryDraftStorageWarningShown) {
+            recoveryDraftStorageWarningShown = true;
+            showToast('浏览器本地恢复草稿写入失败，请立即手动保存', 5000);
+        }
+        return null;
+    }
+}
+
+function workspaceRecoveryDraftRecordForWriter(
+    projectId = state.project?.id || '',
+    chapterId = state.chapter?.id || '',
+) {
+    const storageKey = workspaceRecoveryDraftStorageKey(
+        projectId,
+        chapterId,
+        workspaceRecoveryWriterId,
+    );
+    if (!storageKey) return null;
+    try {
+        const raw = window.localStorage.getItem(storageKey);
+        return typeof raw === 'string' ? { storageKey, raw } : null;
+    } catch {
+        return null;
+    }
+}
+
+function removeWorkspaceRecoveryDraftRecord(record) {
+    if (!record?.storageKey || typeof record.raw !== 'string') return false;
+    try {
+        return compareAndRemoveWorkspaceRecoveryDraft(
+            window.localStorage,
+            record.storageKey,
+            record.raw,
+        );
+    } catch {
+        return false;
+    }
+}
+
+function readWorkspaceRecoveryDraft(projectId, chapterId, excludedStorageKeys = null) {
+    try {
+        const { records, invalid } = scanWorkspaceRecoveryDrafts(
+            window.localStorage,
+            projectId,
+            chapterId,
+        );
+        for (const record of invalid) removeWorkspaceRecoveryDraftRecord(record);
+        const candidates = excludedStorageKeys
+            ? records.filter(record => !excludedStorageKeys.has(record.storageKey))
+            : records;
+        return selectWorkspaceRecoveryDraft(candidates, workspaceRecoveryWriterId);
+    } catch {
+        // Browser recovery is best-effort and never blocks loading the workspace.
+    }
+    return null;
+}
+
+function restoreWorkspaceRecoveryDraft(project, chapter) {
+    if (!project?.id || !chapter?.id) return false;
+    const skippedStorageKeys = new Set();
+    let record = readWorkspaceRecoveryDraft(project.id, chapter.id, skippedStorageKeys);
+    while (record && workspaceRecoveryDraftAlreadyApplied(record.draft, {
+        project,
+        chapter,
+        volume: volumeById(project, record.draft.volumeId),
+    })) {
+        const removed = removeWorkspaceRecoveryDraftRecord(record);
+        const latestRecord = removed
+            ? null
+            : readWorkspaceRecoveryDraft(project.id, chapter.id);
+        const cleanupDecision = workspaceRecoveryDraftCleanupDecision(
+            record,
+            removed,
+            latestRecord,
+        );
+        if (cleanupDecision === 'updated') {
+            record = latestRecord;
+            continue;
+        }
+        if (cleanupDecision === 'skip') skippedStorageKeys.add(record.storageKey);
+        record = readWorkspaceRecoveryDraft(project.id, chapter.id, skippedStorageKeys);
+    }
+    if (!record) return false;
+    const { draft } = record;
+    const volume = volumeById(project, draft.volumeId);
+    const exactAuthority = draft.projectVersion === project.version
+        && draft.chapterRevision === chapter.revision
+        && (draft.volumeDirtyFields.length === 0 || draft.volumeRevision === volume?.revision);
+    const restorePolicy = workspaceRecoveryDraftRestorePolicy(draft, {
+        writerId: workspaceRecoveryWriterId,
+        exactAuthority,
+    });
+    const foreignDraft = draft.writerId !== workspaceRecoveryWriterId;
+    const confirmationMessage = exactAuthority
+        ? '检测到另一个标签页或上次浏览器会话留下的本地恢复草稿。是否把它应用到当前章节？'
+        : '检测到未同步的本地恢复草稿，但服务端版本已经变化。是否把本地草稿重新应用到当前版本？';
+    if (restorePolicy === 'confirm' && !window.confirm(confirmationMessage)) {
+        showToast('本地恢复草稿仍保留，下次打开本章时会再次询问', 5000);
+        return false;
+    }
+
+    state.project = mergeProjectDirtyPaths(project, draft.projectChanges, draft.projectDirtyPaths);
+    state.chapter = mergeDirtyPaths(chapter, draft.chapterChanges, draft.chapterDirtyPaths);
+    if (draft.volumeDirtyFields.length > 0 && volume) {
+        const restoredVolume = volumeById(state.project, volume.id);
+        for (const field of draft.volumeDirtyFields) restoredVolume[field] = draft.volumeChanges[field];
+    }
+    state.projectDirtyPaths = new Set(draft.projectDirtyPaths);
+    state.chapterDirtyPaths = new Set(draft.chapterDirtyPaths);
+    state.volumeDirtyFields = new Set(draft.volumeDirtyFields);
+    state.projectDirty = state.projectDirtyPaths.size > 0;
+    state.chapterDirty = state.chapterDirtyPaths.size > 0;
+    state.volumeDirty = state.volumeDirtyFields.size > 0;
+    state.volumeDirtyId = state.volumeDirty ? draft.volumeId : '';
+    restoredWorkspaceRecoverySource = foreignDraft
+        ? {
+            projectId: project.id,
+            chapterId: chapter.id,
+            storageKey: record.storageKey,
+            raw: record.raw,
+        }
+        : null;
+    invalidateCopilotPreview({ preserveError: true });
+    scheduleAutosave();
+    showToast(
+        exactAuthority && !foreignDraft
+            ? '已恢复本标签页未完成的本地草稿，正在自动保存'
+            : exactAuthority
+                ? '已应用另一标签页或浏览器会话的本地草稿，正在自动保存'
+            : '已重新应用本地恢复草稿，正在保存到当前版本',
+        5000,
+    );
+    return true;
+}
+
+function persistLifecycleRecoveryDraft() {
+    persistWorkspaceRecoveryDraft();
+    if (!state.project?.id || !state.chapter?.id || !state.chapterDirty
+        || state.projectDirty || state.volumeDirty || state.saveInFlight
+        || state.chapterDirtyPaths.size === 0 || !state.csrfToken) return;
+    const dirtyPaths = new Set(state.chapterDirtyPaths);
+    const body = {
+        projectVersion: optimisticTokenFor(state.projectBase, state.project, 'version'),
+        revision: optimisticTokenFor(state.chapterBase, state.chapter, 'revision'),
+        changes: buildRecordChanges(state.chapter, dirtyPaths),
+    };
+    const signature = JSON.stringify([
+        state.project.id,
+        state.chapter.id,
+        body.projectVersion,
+        body.revision,
+        body.changes,
+    ]);
+    if (signature === lifecycleRecoveryFlushSignature) return;
+    lifecycleRecoveryFlushSignature = signature;
+    void fetch(pathForProject(
+        state.project.id,
+        `/chapters/${encodeURIComponent(state.chapter.id)}`,
+    ), {
+        method: 'PATCH',
+        headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': state.csrfToken,
+        },
+        body: JSON.stringify(body),
+        keepalive: true,
+    }).catch(() => {
+        // The synchronous local recovery draft remains the fallback.
+    });
 }
 
 function qualityChapterPath(projectId, chapterId, suffix = '') {
@@ -1132,60 +1531,86 @@ function upsertProjectSummary(project) {
     state.projects.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
 }
 
-function projectChanges(project, fieldPaths) {
-    const directPaths = [...fieldPaths].filter(fieldPath => !isContinuityPath(fieldPath));
-    const changes = directPaths.length > 0 ? mergeDirtyPaths({}, project, directPaths) : {};
-    if ([...fieldPaths].some(isContinuityPath)) changes.continuity = clone(project.continuity || []);
-    return changes;
-}
-
-function chapterChanges(chapter, fieldPaths) {
-    return mergeDirtyPaths({}, chapter, fieldPaths);
-}
-
-function acceptServerProject(serverProject, preservePaths = state.projectDirtyPaths, { advanceVolumeBase = false } = {}) {
+function acceptServerProject(
+    serverProject,
+    preservePaths = state.projectDirtyPaths,
+    {
+        advanceVolumeBase = false,
+        preserveSavingPaths = true,
+        advancePreservedBase = false,
+    } = {},
+) {
     if (!serverProject) return;
     const local = state.project?.id === serverProject.id ? state.project : null;
+    const previousBase = state.projectBase?.id === serverProject.id ? state.projectBase : null;
     const previousSelectedId = state.selectedVolumeId;
-    const dirtyVolumeId = state.volumeDirtyId;
-    const localDirtyVolume = volumeById(local, dirtyVolumeId);
-    const serverDirtyVolume = volumeById(serverProject, dirtyVolumeId);
-    if (state.volumeDirtyFields.size > 0 && dirtyVolumeId && (!localDirtyVolume || !serverDirtyVolume)) {
-        throw new ApiError('正在编辑的卷已在另一个窗口被删除；本地卷纲尚未覆盖，请刷新后重新处理', 409, {
-            error: 'volume_not_found',
-        });
+    const preservedVolumes = new Map();
+    for (const [volumeId, fields] of [
+        [state.volumeDirtyId, state.volumeDirtyFields],
+        [state.volumeSavingId, preserveSavingPaths ? state.volumeSavingFields : new Set()],
+    ]) {
+        if (!volumeId || fields.size === 0) continue;
+        const preservedFields = preservedVolumes.get(volumeId) || new Set();
+        for (const field of fields) preservedFields.add(field);
+        preservedVolumes.set(volumeId, preservedFields);
+    }
+    for (const volumeId of preservedVolumes.keys()) {
+        if (!volumeById(local, volumeId) || !volumeById(serverProject, volumeId)) {
+            throw new ApiError('正在编辑的卷已在另一个窗口被删除；本地卷纲尚未覆盖，请刷新后重新处理', 409, {
+                error: 'volume_not_found',
+            });
+        }
     }
     const selectedId = selectVolumeId(serverProject, previousSelectedId);
     const serverSelectedVolume = volumeById(serverProject, selectedId);
-    const paths = new Set(preservePaths || []);
-    state.projectBase = clone(serverProject);
-    state.project = paths.size > 0 && local
-        ? mergeProjectDirtyPaths(serverProject, local, paths)
-        : serverProject;
-    if (localDirtyVolume && state.volumeDirtyFields.size > 0) {
-        const target = volumeById(state.project, dirtyVolumeId);
-        if (target) {
-            for (const field of state.volumeDirtyFields) target[field] = localDirtyVolume[field];
-        }
+    const authority = mergeProjectAuthoritySnapshot({
+        remote: serverProject,
+        local,
+        baseline: previousBase,
+        dirtyPaths: preservePaths,
+        savingPaths: state.projectSavingPaths,
+        preserveSavingPaths,
+        advanceBaseline: advancePreservedBase,
+        relatedPending: preservedVolumes.size > 0,
+    });
+    state.projectBase = authority.baseline;
+    state.project = authority.record;
+    for (const [volumeId, fields] of preservedVolumes) {
+        const localVolume = volumeById(local, volumeId);
+        const target = volumeById(state.project, volumeId);
+        for (const field of fields) target[field] = localVolume[field];
     }
-    if (advanceVolumeBase || state.volumeDirtyFields.size === 0) {
-        const nextBase = advanceVolumeBase && serverDirtyVolume ? serverDirtyVolume : serverSelectedVolume;
+    if (advanceVolumeBase || preservedVolumes.size === 0) {
+        const advancedVolumeId = state.volumeSavingId || state.volumeDirtyId;
+        const advancedVolume = volumeById(serverProject, advancedVolumeId);
+        const nextBase = advanceVolumeBase && advancedVolume ? advancedVolume : serverSelectedVolume;
         state.volumeBase = nextBase ? clone(nextBase) : null;
     }
     syncCopilotAuthorityState();
     upsertProjectSummary(state.project);
 }
 
-function acceptServerChapter(serverChapter, preservePaths = state.chapterDirtyPaths) {
+function acceptServerChapter(
+    serverChapter,
+    preservePaths = state.chapterDirtyPaths,
+    { preserveSavingPaths = true, advancePreservedBase = false } = {},
+) {
     if (!serverChapter) return;
     const local = state.chapter?.id === serverChapter.id ? state.chapter : null;
+    const previousBase = state.chapterBase?.id === serverChapter.id ? state.chapterBase : null;
     const previousRevision = local?.revision;
     const previousCandidate = local?.candidate;
-    const paths = new Set(preservePaths || []);
-    state.chapterBase = clone(serverChapter);
-    state.chapter = paths.size > 0 && local
-        ? mergeDirtyPaths(serverChapter, local, paths)
-        : serverChapter;
+    const authority = mergeChapterAuthoritySnapshot({
+        remote: serverChapter,
+        local,
+        baseline: previousBase,
+        dirtyPaths: preservePaths,
+        savingPaths: state.chapterSavingPaths,
+        preserveSavingPaths,
+        advanceBaseline: advancePreservedBase,
+    });
+    state.chapterBase = authority.baseline;
+    state.chapter = authority.record;
     if (JSON.stringify(previousCandidate) !== JSON.stringify(state.chapter.candidate)) {
         state.candidateEditSerial += 1;
     }
@@ -1194,7 +1619,10 @@ function acceptServerChapter(serverChapter, preservePaths = state.chapterDirtyPa
     }
 }
 
-function clearDirtyState() {
+function clearDirtyState({ preserveRecoveryDraft = false } = {}) {
+    const recoveryDraft = preserveRecoveryDraft
+        ? null
+        : workspaceRecoveryDraftRecordForWriter();
     window.clearTimeout(autosaveTimer);
     autosaveTimer = null;
     state.projectDirty = false;
@@ -1204,11 +1632,16 @@ function clearDirtyState() {
     state.chapterDirtyPaths.clear();
     state.volumeDirtyFields.clear();
     state.volumeDirtyId = '';
+    lifecycleRecoveryFlushSignature = '';
+    invalidateContextPreview();
+    if (!preserveRecoveryDraft) removeWorkspaceRecoveryDraftRecord(recoveryDraft);
     setSaveStatus('已保存', 'saved');
 }
 
 function scheduleAutosave() {
     window.clearTimeout(autosaveTimer);
+    lifecycleRecoveryFlushSignature = '';
+    persistWorkspaceRecoveryDraft();
     setSaveStatus('待保存', 'saving');
     autosaveTimer = window.setTimeout(() => {
         autosaveTimer = null;
@@ -1222,6 +1655,7 @@ function markProjectDirty(fieldPaths) {
         if (fieldPath) state.projectDirtyPaths.add(fieldPath);
     }
     state.projectDirty = true;
+    invalidateContextPreview();
     invalidateCopilotPreview({ preserveError: true });
     scheduleAutosave();
 }
@@ -1232,6 +1666,7 @@ function markChapterDirty(fieldPaths) {
         if (fieldPath) state.chapterDirtyPaths.add(fieldPath);
     }
     state.chapterDirty = true;
+    invalidateContextPreview();
     invalidateCopilotPreview({ preserveError: true });
     scheduleAutosave();
 }
@@ -1245,6 +1680,7 @@ function markVolumeDirty(field) {
     state.volumeDirtyId = volume.id;
     state.volumeDirtyFields.add(field);
     state.volumeDirty = true;
+    invalidateContextPreview();
     invalidateCopilotPreview({ preserveError: true });
     scheduleAutosave();
 }
@@ -1259,30 +1695,26 @@ function conflictMessage(kind) {
     return `${subject}的同一字段已在另一个窗口发生变化。\n\n选择“确定”将保留本窗口对冲突字段的内容。\n选择“取消”将采用服务端的冲突字段。未冲突的本地改动都会保留。`;
 }
 
-function discardAlreadyAppliedPaths(remote, local, fieldPaths) {
-    for (const fieldPath of [...fieldPaths]) {
-        if (JSON.stringify(getValueAtPath(remote, fieldPath)) === JSON.stringify(getValueAtPath(local, fieldPath))) {
-            fieldPaths.delete(fieldPath);
-        }
-    }
-}
-
 function reconcileProjectConflict(remoteProject) {
     const localProject = state.project;
     const remoteView = continuityView(remoteProject);
     const localView = continuityView(localProject);
-    discardAlreadyAppliedPaths(remoteView, localView, state.projectDirtyPaths);
-    const conflictingPaths = findConflictingPaths(
-        continuityView(state.projectBase || remoteProject),
-        remoteView,
-        localView,
-        state.projectDirtyPaths,
-    );
+    const conflict = classifyConflictPaths({
+        baseline: continuityView(state.projectBase || remoteProject),
+        remote: remoteView,
+        local: localView,
+        fieldPaths: state.projectDirtyPaths,
+    });
+    state.projectDirtyPaths.clear();
+    for (const fieldPath of conflict.pendingPaths) state.projectDirtyPaths.add(fieldPath);
+    const { conflictingPaths } = conflict;
     if (conflictingPaths.length > 0 && !window.confirm(conflictMessage('project'))) {
         for (const fieldPath of conflictingPaths) state.projectDirtyPaths.delete(fieldPath);
     }
 
-    acceptServerProject(remoteProject, state.projectDirtyPaths);
+    acceptServerProject(remoteProject, state.projectDirtyPaths, {
+        advancePreservedBase: true,
+    });
     state.projectDirty = state.projectDirtyPaths.size > 0;
     renderProjectData();
     showToast(conflictingPaths.length > 0 ? '冲突字段已处理，正在保存未冲突改动' : '已自动合并服务端更新');
@@ -1303,10 +1735,15 @@ async function resolveProjectConflict(projectId) {
 
 async function resolveChapterConflict(projectId, chapterId) {
     setSaveStatus('版本冲突', 'conflict');
-    const [remoteProject, remoteChapter] = await Promise.all([
-        apiRequest(pathForProject(projectId)),
-        apiRequest(pathForProject(projectId, `/chapters/${encodeURIComponent(chapterId)}`)),
-    ]);
+    const authority = await apiRequest(pathForProject(
+        projectId,
+        `/chapters/${encodeURIComponent(chapterId)}/authority`,
+    ));
+    const remoteProject = authority?.project;
+    const remoteChapter = authority?.chapter;
+    if (!remoteProject || !remoteChapter) {
+        throw new Error('服务端没有返回完整的章节权威状态');
+    }
     if (state.project?.id !== projectId || state.chapter?.id !== chapterId) return false;
 
     const projectBase = state.projectBase;
@@ -1320,18 +1757,22 @@ async function resolveChapterConflict(projectId, chapterId) {
         acceptServerProject(remoteProject);
     }
     const localChapter = state.chapter;
-    discardAlreadyAppliedPaths(remoteChapter, localChapter, state.chapterDirtyPaths);
-    const conflictingPaths = findConflictingPaths(
-        state.chapterBase || remoteChapter,
-        remoteChapter,
-        localChapter,
-        state.chapterDirtyPaths,
-    );
+    const conflict = classifyConflictPaths({
+        baseline: state.chapterBase || remoteChapter,
+        remote: remoteChapter,
+        local: localChapter,
+        fieldPaths: state.chapterDirtyPaths,
+    });
+    state.chapterDirtyPaths.clear();
+    for (const fieldPath of conflict.pendingPaths) state.chapterDirtyPaths.add(fieldPath);
+    const { conflictingPaths } = conflict;
     if (conflictingPaths.length > 0 && !window.confirm(conflictMessage('chapter'))) {
         for (const fieldPath of conflictingPaths) state.chapterDirtyPaths.delete(fieldPath);
     }
 
-    acceptServerChapter(remoteChapter, state.chapterDirtyPaths);
+    acceptServerChapter(remoteChapter, state.chapterDirtyPaths, {
+        advancePreservedBase: true,
+    });
     state.chapterDirty = state.chapterDirtyPaths.size > 0;
     renderProjectData();
     if (state.inspector === 'versions' && !versionCacheMatchesChapter()) {
@@ -1348,20 +1789,23 @@ function reconcileVolumeConflict(remoteProject, { render = true, notify = true }
     if (!localVolume || !remoteVolume) {
         throw new ApiError('当前卷已不存在，请重新选择卷', 409, { error: 'volume_not_found' });
     }
-    for (const field of [...state.volumeDirtyFields]) {
-        if (JSON.stringify(remoteVolume[field]) === JSON.stringify(localVolume[field])) {
-            state.volumeDirtyFields.delete(field);
-        }
-    }
-    const conflicts = [...state.volumeDirtyFields].filter(field => (
-        JSON.stringify(state.volumeBase?.[field]) !== JSON.stringify(remoteVolume[field])
-        && JSON.stringify(localVolume[field]) !== JSON.stringify(remoteVolume[field])
-    ));
+    const conflict = classifyConflictPaths({
+        baseline: state.volumeBase || {},
+        remote: remoteVolume,
+        local: localVolume,
+        fieldPaths: state.volumeDirtyFields,
+    });
+    state.volumeDirtyFields.clear();
+    for (const field of conflict.pendingPaths) state.volumeDirtyFields.add(field);
+    const conflicts = conflict.conflictingPaths;
     if (conflicts.length > 0 && !window.confirm('当前卷的同一字段已在另一个窗口变化。\n\n选择“确定”保留本窗口内容，选择“取消”采用服务端内容。')) {
         for (const field of conflicts) state.volumeDirtyFields.delete(field);
     }
     state.volumeDirty = state.volumeDirtyFields.size > 0;
-    acceptServerProject(remoteProject, state.projectDirtyPaths, { advanceVolumeBase: true });
+    acceptServerProject(remoteProject, state.projectDirtyPaths, {
+        advanceVolumeBase: true,
+        advancePreservedBase: true,
+    });
     if (!state.volumeDirty) state.volumeDirtyId = '';
     if (render) renderProjectData();
     if (notify) showToast(conflicts.length > 0 ? '卷纲冲突已处理' : '已自动合并卷纲更新');
@@ -1386,21 +1830,33 @@ async function flushDirtyImpl() {
     }
 
     const authorityProjectId = state.project.id;
+    const authorityChapterId = state.chapter?.id || '';
     const authorityVersionBeforeSave = state.project.version;
+    const recoveryDraftAtSaveStart = workspaceRecoveryDraftRecordForWriter(
+        authorityProjectId,
+        authorityChapterId,
+    );
+    const restoredRecoverySourceAtSaveStart = restoredWorkspaceRecoverySource
+        && restoredWorkspaceRecoverySource.projectId === authorityProjectId
+        && restoredWorkspaceRecoverySource.chapterId === authorityChapterId
+        ? { ...restoredWorkspaceRecoverySource }
+        : null;
     setSaveStatus('保存中', 'saving');
     let conflictRetries = 0;
 
     while (state.project && (state.projectDirty || state.volumeDirty || state.chapterDirty)) {
         if (state.projectDirty) {
             const projectId = state.project.id;
-            const version = state.project.version;
-            const dirtyPaths = new Set(state.projectDirtyPaths);
+            const version = optimisticTokenFor(state.projectBase, state.project, 'version');
+            const batch = beginSaveBatch(state.projectDirtyPaths);
+            const dirtyPaths = batch.savingPaths;
             if (dirtyPaths.size === 0) {
                 state.projectDirty = false;
                 continue;
             }
-            const changes = projectChanges(state.project, dirtyPaths);
-            for (const fieldPath of dirtyPaths) state.projectDirtyPaths.delete(fieldPath);
+            const changes = buildProjectChanges(state.project, dirtyPaths);
+            state.projectSavingPaths = new Set(dirtyPaths);
+            state.projectDirtyPaths = batch.dirtyPaths;
             state.projectDirty = state.projectDirtyPaths.size > 0;
 
             try {
@@ -1409,12 +1865,25 @@ async function flushDirtyImpl() {
                     body: { version, changes },
                 });
                 if (state.project?.id !== projectId) return true;
+                if (authorityResponseTokenIsStale(serverProject, state.project, 'version')) {
+                    state.projectSavingPaths.clear();
+                    state.projectDirtyPaths = rollbackSaveBatch(state.projectDirtyPaths, dirtyPaths);
+                    state.projectDirty = true;
+                    const retry = await resolveProjectConflict(projectId);
+                    if (retry) continue;
+                    conflictRetries = 0;
+                    continue;
+                }
                 state.projectDirty = state.projectDirtyPaths.size > 0;
-                acceptServerProject(serverProject, state.projectDirtyPaths);
+                acceptServerProject(serverProject, state.projectDirtyPaths, {
+                    preserveSavingPaths: false,
+                    advancePreservedBase: true,
+                });
                 conflictRetries = 0;
                 renderSaveMetadata();
             } catch (error) {
-                for (const fieldPath of dirtyPaths) state.projectDirtyPaths.add(fieldPath);
+                state.projectSavingPaths.clear();
+                state.projectDirtyPaths = rollbackSaveBatch(state.projectDirtyPaths, dirtyPaths);
                 state.projectDirty = true;
                 if (error instanceof ApiError && error.code === 'project_busy' && conflictRetries < MAX_CONFLICT_RETRIES) {
                     conflictRetries += 1;
@@ -1437,6 +1906,8 @@ async function flushDirtyImpl() {
                 setSaveStatus('保存失败', 'error');
                 showToast(error.message || '作品设定保存失败', 5000);
                 return false;
+            } finally {
+                state.projectSavingPaths.clear();
             }
         }
 
@@ -1449,16 +1920,19 @@ async function flushDirtyImpl() {
                 state.volumeDirtyId = '';
                 continue;
             }
-            const projectVersion = state.project.version;
-            const revision = volume.revision;
-            const dirtyFields = new Set(state.volumeDirtyFields);
+            const projectVersion = optimisticTokenFor(state.projectBase, state.project, 'version');
+            const revision = optimisticTokenFor(state.volumeBase, volume, 'revision');
+            const batch = beginSaveBatch(state.volumeDirtyFields);
+            const dirtyFields = batch.savingPaths;
             if (dirtyFields.size === 0) {
                 state.volumeDirty = false;
                 state.volumeDirtyId = '';
                 continue;
             }
-            const changes = Object.fromEntries([...dirtyFields].map(field => [field, volume[field]]));
-            for (const field of dirtyFields) state.volumeDirtyFields.delete(field);
+            const changes = buildRecordChanges(volume, dirtyFields);
+            state.volumeSavingId = volume.id;
+            state.volumeSavingFields = new Set(dirtyFields);
+            state.volumeDirtyFields = batch.dirtyPaths;
             state.volumeDirty = state.volumeDirtyFields.size > 0;
 
             try {
@@ -1467,15 +1941,34 @@ async function flushDirtyImpl() {
                     body: { projectVersion, revision, changes },
                 });
                 if (state.project?.id !== projectId || state.volumeDirtyId !== volume.id) return true;
+                const responseVolume = volumeById(result.project, volume.id);
+                const currentVolume = volumeById(state.project, volume.id);
+                if (authorityResponseTokenIsStale(result.project, state.project, 'version')
+                    || authorityResponseTokenIsStale(responseVolume, currentVolume, 'revision')) {
+                    state.volumeSavingFields.clear();
+                    state.volumeSavingId = '';
+                    state.volumeDirtyFields = rollbackSaveBatch(state.volumeDirtyFields, dirtyFields);
+                    state.volumeDirty = true;
+                    const retry = await resolveVolumeConflict(projectId);
+                    if (retry) continue;
+                    conflictRetries = 0;
+                    continue;
+                }
                 state.volumeDirty = state.volumeDirtyFields.size > 0;
-                acceptServerProject(result.project, state.projectDirtyPaths, { advanceVolumeBase: true });
+                acceptServerProject(result.project, state.projectDirtyPaths, {
+                    advanceVolumeBase: true,
+                    preserveSavingPaths: false,
+                    advancePreservedBase: true,
+                });
                 if (!state.volumeDirty) state.volumeDirtyId = '';
                 conflictRetries = 0;
                 renderSaveMetadata();
                 renderBible();
                 renderCard();
             } catch (error) {
-                for (const field of dirtyFields) state.volumeDirtyFields.add(field);
+                state.volumeSavingFields.clear();
+                state.volumeSavingId = '';
+                state.volumeDirtyFields = rollbackSaveBatch(state.volumeDirtyFields, dirtyFields);
                 state.volumeDirty = true;
                 if (error instanceof ApiError && error.code === 'project_busy' && conflictRetries < MAX_CONFLICT_RETRIES) {
                     conflictRetries += 1;
@@ -1508,21 +2001,26 @@ async function flushDirtyImpl() {
                 setSaveStatus('保存失败', 'error');
                 showToast(error.message || '卷纲保存失败', 5000);
                 return false;
+            } finally {
+                state.volumeSavingFields.clear();
+                state.volumeSavingId = '';
             }
         }
 
         if (state.chapterDirty && state.chapter) {
             const projectId = state.project.id;
             const chapterId = state.chapter.id;
-            const projectVersion = state.project.version;
-            const revision = state.chapter.revision;
-            const dirtyPaths = new Set(state.chapterDirtyPaths);
+            const projectVersion = optimisticTokenFor(state.projectBase, state.project, 'version');
+            const revision = optimisticTokenFor(state.chapterBase, state.chapter, 'revision');
+            const batch = beginSaveBatch(state.chapterDirtyPaths);
+            const dirtyPaths = batch.savingPaths;
             if (dirtyPaths.size === 0) {
                 state.chapterDirty = false;
                 continue;
             }
-            const changes = chapterChanges(state.chapter, dirtyPaths);
-            for (const fieldPath of dirtyPaths) state.chapterDirtyPaths.delete(fieldPath);
+            const changes = buildRecordChanges(state.chapter, dirtyPaths);
+            state.chapterSavingPaths = new Set(dirtyPaths);
+            state.chapterDirtyPaths = batch.dirtyPaths;
             state.chapterDirty = state.chapterDirtyPaths.size > 0;
 
             try {
@@ -1531,16 +2029,33 @@ async function flushDirtyImpl() {
                     body: { projectVersion, revision, changes },
                 });
                 if (state.project?.id !== projectId || state.chapter?.id !== chapterId) return true;
+                if (authorityResponseTokenIsStale(result.project, state.project, 'version')
+                    || authorityResponseTokenIsStale(result.chapter, state.chapter, 'revision')) {
+                    state.chapterSavingPaths.clear();
+                    state.chapterDirtyPaths = rollbackSaveBatch(state.chapterDirtyPaths, dirtyPaths);
+                    state.chapterDirty = true;
+                    const retry = await resolveChapterConflict(projectId, chapterId);
+                    if (retry) continue;
+                    conflictRetries = 0;
+                    continue;
+                }
                 state.chapterDirty = state.chapterDirtyPaths.size > 0;
-                acceptServerProject(result.project, state.projectDirtyPaths);
-                acceptServerChapter(result.chapter, state.chapterDirtyPaths);
+                acceptServerProject(result.project, state.projectDirtyPaths, {
+                    preserveSavingPaths: false,
+                    advancePreservedBase: true,
+                });
+                acceptServerChapter(result.chapter, state.chapterDirtyPaths, {
+                    preserveSavingPaths: false,
+                    advancePreservedBase: true,
+                });
                 conflictRetries = 0;
                 renderSaveMetadata();
                 if (state.inspector === 'versions' && !state.navigationBusy && !state.versionRestoring) {
                     void refreshVersionHistory();
                 }
             } catch (error) {
-                for (const fieldPath of dirtyPaths) state.chapterDirtyPaths.add(fieldPath);
+                state.chapterSavingPaths.clear();
+                state.chapterDirtyPaths = rollbackSaveBatch(state.chapterDirtyPaths, dirtyPaths);
                 state.chapterDirty = true;
                 if (error instanceof ApiError && error.code === 'project_busy' && conflictRetries < MAX_CONFLICT_RETRIES) {
                     conflictRetries += 1;
@@ -1581,11 +2096,21 @@ async function flushDirtyImpl() {
                 setSaveStatus('保存失败', 'error');
                 showToast(error.message || '章节保存失败', 5000);
                 return false;
+            } finally {
+                state.chapterSavingPaths.clear();
             }
         }
     }
 
     setSaveStatus('已保存', 'saved');
+    removeWorkspaceRecoveryDraftRecord(recoveryDraftAtSaveStart);
+    if (restoredRecoverySourceAtSaveStart) {
+        removeWorkspaceRecoveryDraftRecord(restoredRecoverySourceAtSaveStart);
+        if (restoredWorkspaceRecoverySource?.storageKey === restoredRecoverySourceAtSaveStart.storageKey
+            && restoredWorkspaceRecoverySource.raw === restoredRecoverySourceAtSaveStart.raw) {
+            restoredWorkspaceRecoverySource = null;
+        }
+    }
     if (state.project?.id === authorityProjectId
         && state.project.version !== authorityVersionBeforeSave) {
         syncCopilotAuthorityState();
@@ -1611,6 +2136,18 @@ function enqueueSave() {
     return saveQueue;
 }
 
+function authorityMutationView() {
+    return state.authorityMutation?.view || '';
+}
+
+function authorityMutationLocked() {
+    return Boolean(authorityMutationView());
+}
+
+function syncShellInert() {
+    elements.ss_shell.inert = state.navigationBusy || state.pendingChangeSetAdopting || state.adopting;
+}
+
 function setProjectControlsDisabled(disabled) {
     for (const element of [
         elements.ss_save,
@@ -1623,19 +2160,81 @@ function setProjectControlsDisabled(disabled) {
     }
 }
 
+function syncAuthorityMutationUi() {
+    const locked = authorityMutationLocked();
+    elements.ss_project_select.disabled = locked || state.navigationBusy || state.projects.length === 0;
+    elements.ss_new_project.disabled = locked || state.navigationBusy;
+    for (const button of elements.viewTabs) button.disabled = locked;
+    elements.ss_toggle_binder.disabled = locked
+        || ['today', 'resources', 'copilot', 'quality'].includes(state.view);
+    elements.ss_toggle_inspector.disabled = locked
+        || ['today', 'resources', 'copilot', 'workflow', 'quality'].includes(state.view);
+    syncResponsivePanels();
+}
+
+function beginAuthorityMutation(view) {
+    const token = ++state.authorityMutationSerial;
+    state.authorityMutation = { token, view };
+    syncAuthorityMutationUi();
+    return token;
+}
+
+function finishAuthorityMutation(token) {
+    if (state.authorityMutation?.token !== token) return;
+    state.authorityMutation = null;
+    syncAuthorityMutationUi();
+}
+
 function setNavigationBusy(busy) {
     state.navigationBusy = busy;
-    elements.ss_shell.inert = busy;
+    syncShellInert();
     elements.ss_create_project_form.inert = busy;
-    elements.ss_project_select.disabled = busy || state.projects.length === 0;
-    elements.ss_new_project.disabled = busy;
+    elements.ss_project_select.disabled = busy || authorityMutationLocked() || state.projects.length === 0;
+    elements.ss_new_project.disabled = busy || authorityMutationLocked();
     elements.story_studio_workspace.toggleAttribute('aria-busy', busy);
+}
+
+function cancelContextPreviewRequest() {
+    if (state.contextPreviewController && !state.contextPreviewController.signal.aborted) {
+        state.contextPreviewController.abort();
+    }
+    state.contextPreviewRequestSerial += 1;
+    state.contextPreviewController = null;
+}
+
+function invalidateContextPreview() {
+    cancelContextPreviewRequest();
+    state.generationPreview = null;
+    if (elements.ss_context_preview) {
+        renderContextPreview();
+        renderGenerationControls();
+    }
+}
+
+function beginContextPreviewRequest() {
+    cancelContextPreviewRequest();
+    const controller = new AbortController();
+    state.contextPreviewController = controller;
+    return {
+        controller,
+        requestSerial: state.contextPreviewRequestSerial,
+    };
+}
+
+function contextPreviewRequestIsCurrent(projectId, chapterId, navigationEpoch, requestSerial, controller) {
+    return state.project?.id === projectId
+        && state.chapter?.id === chapterId
+        && state.navigationEpoch === navigationEpoch
+        && state.contextPreviewRequestSerial === requestSerial
+        && state.contextPreviewController === controller
+        && !controller.signal.aborted;
 }
 
 function beginNavigation() {
     if (state.generationController && !state.generationController.signal.aborted) {
         state.generationController.abort();
     }
+    cancelContextPreviewRequest();
     state.navigationEpoch += 1;
     setNavigationBusy(true);
     return state.navigationEpoch;
@@ -1699,7 +2298,7 @@ function renderProjectSelect() {
         return;
     }
 
-    elements.ss_project_select.disabled = state.navigationBusy;
+    elements.ss_project_select.disabled = state.navigationBusy || authorityMutationLocked();
     for (const project of state.projects) {
         const option = document.createElement('option');
         option.value = project.id;
@@ -3098,9 +3697,8 @@ function setRetrievalOverride(id, mode) {
         next[mode].push(id);
     }
     state.retrievalOverrides = next;
-    state.generationPreview = null;
+    invalidateContextPreview();
     renderContextOverrides();
-    renderContextPreview();
     return true;
 }
 
@@ -3537,6 +4135,13 @@ function copilotRequestIsCurrent(projectId, requestSerial) {
     return state.project?.id === projectId
         && state.copilotProjectId === projectId
         && state.copilotRequestSerial === requestSerial;
+}
+
+function copilotGenerationIsCurrent(projectId, sessionId, controller) {
+    return state.project?.id === projectId
+        && state.copilotProjectId === projectId
+        && state.copilotSessionId === sessionId
+        && state.copilotGenerationController === controller;
 }
 
 function resetCopilotWorkspace() {
@@ -4152,7 +4757,10 @@ async function loadCopilotSessions({ preferredSessionId = state.copilotSessionId
     renderCopilotWorkspace();
     let selectedId = '';
     try {
-        const payload = await apiRequest(copilotPath(projectId, '/sessions'));
+        const payload = await apiMutation(copilotPath(projectId, '/sessions/reconcile'), {
+            method: 'POST',
+            body: {},
+        });
         if (!copilotRequestIsCurrent(projectId, requestSerial)) return;
         state.copilotSessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
         selectedId = state.copilotSessions.find(item => item.id === preferredSessionId)?.id
@@ -4193,7 +4801,10 @@ async function loadCopilotWorkspace() {
         const [settings, resources, sessionsPayload] = await Promise.all([
             apiRequest('/api/copilot/settings'),
             apiRequest(pathForProject(projectId, '/resources')),
-            apiRequest(copilotPath(projectId, '/sessions')),
+            apiMutation(copilotPath(projectId, '/sessions/reconcile'), {
+                method: 'POST',
+                body: {},
+            }),
         ]);
         const profiles = await loadCopilotProfiles(projectId, Array.isArray(resources) ? resources : []);
         if (!copilotRequestIsCurrent(projectId, requestSerial)) return;
@@ -4380,6 +4991,7 @@ async function generateCopilotSession(retryBody = null) {
     const session = currentCopilotSession();
     if (!projectId || !session || state.copilotGenerating || state.copilotBusy
         || copilotSessionAuthorityStale(session, state.project)) return;
+    const sessionId = session.id;
     const body = retryBody || {
         commandId: copilotCommandId('generate'),
         sessionRevision: session.revision,
@@ -4393,26 +5005,36 @@ async function generateCopilotSession(retryBody = null) {
     state.copilotStream = '';
     renderCopilotWorkspace();
     try {
-        await streamMutation(copilotPath(projectId, `/sessions/${encodeURIComponent(session.id)}/generate`), body, {
-            signal: controller.signal,
-            onEvent: event => {
-                if (event?.type === 'delta') {
-                    state.copilotStream += String(event.delta || '');
-                    elements.ss_copilot_stream.textContent = state.copilotStream;
-                    elements.ss_copilot_stream.hidden = false;
-                } else if (event?.type === 'done') {
-                    if (event.session) state.copilotSession = event.session;
-                    if (event.artifact && state.copilotSession) state.copilotSession.artifact = event.artifact;
-                } else if (event?.type === 'error') {
-                    throw new ApiError(event.message || '策划生成失败', 502, event);
-                }
-                renderCopilotSessionSummary();
-                renderCopilotActionState();
+        const completed = await streamMutation(
+            copilotPath(projectId, `/sessions/${encodeURIComponent(session.id)}/generate`),
+            body,
+            {
+                signal: controller.signal,
+                onEvent: event => {
+                    if (!copilotGenerationIsCurrent(projectId, sessionId, controller)) return;
+                    if (event?.type === 'delta') {
+                        state.copilotStream += String(event.delta || '');
+                        elements.ss_copilot_stream.textContent = state.copilotStream;
+                        elements.ss_copilot_stream.hidden = false;
+                    } else if (event?.type === 'done') {
+                        if (event.session) state.copilotSession = event.session;
+                        if (event.artifact && state.copilotSession) state.copilotSession.artifact = event.artifact;
+                    } else if (event?.type === 'error') {
+                        throw new ApiError(event.message || '策划生成失败', 502, event);
+                    }
+                    renderCopilotSessionSummary();
+                    renderCopilotActionState();
+                },
             },
-        });
+        );
+        if (!copilotGenerationIsCurrent(projectId, sessionId, controller)) return;
+        if (!completed) {
+            throw new ApiError('策划生成数据流提前结束', 502, { error: 'copilot_stream_ended' });
+        }
         state.copilotStream = '';
         showToast('策划候选已生成');
     } catch (error) {
+        if (!copilotGenerationIsCurrent(projectId, sessionId, controller)) return;
         if (!controller.signal.aborted && !state.copilotCancelling) {
             state.copilotError = error.message || '策划生成失败';
             state.copilotRetry = error instanceof ApiError
@@ -4420,13 +5042,15 @@ async function generateCopilotSession(retryBody = null) {
                 : { kind: 'generate-receipt', body };
         }
     } finally {
-        if (state.copilotGenerationController === controller) state.copilotGenerationController = null;
-        state.copilotGenerating = false;
-        state.copilotCancelling = false;
-        renderCopilotWorkspace();
+        if (copilotGenerationIsCurrent(projectId, sessionId, controller)) {
+            state.copilotGenerationController = null;
+            state.copilotGenerating = false;
+            state.copilotCancelling = false;
+            renderCopilotWorkspace();
+        }
     }
-    if (state.copilotProjectId === projectId && state.copilotSessionId === session.id) {
-        await loadCopilotSessions({ preferredSessionId: session.id });
+    if (state.copilotProjectId === projectId && state.copilotSessionId === sessionId) {
+        await loadCopilotSessions({ preferredSessionId: sessionId });
     }
 }
 
@@ -5212,6 +5836,7 @@ async function copyQualityProfile() {
     const profileId = state.qualityProfileId;
     if (!projectId || !profileId || state.qualityBusy) return;
     state.qualityBusy = true;
+    const authorityMutationToken = beginAuthorityMutation('quality');
     state.qualityError = '';
     state.qualityRetry = null;
     state.qualityCopyStatus = '';
@@ -5233,8 +5858,7 @@ async function copyQualityProfile() {
             },
         );
         if (!qualityBindingMatches(projectId, chapterId)) return;
-        acceptServerProject(result.project, new Set());
-        upsertProjectSummary(result.project);
+        acceptServerProject(result.project);
         renderSaveMetadata();
         state.qualityCopyStatus = `已复制“${result.resource?.name || 'Profile 副本'}”，可在资源工作区继续编辑`;
         elements.ss_quality_copy_name.value = '';
@@ -5246,8 +5870,9 @@ async function copyQualityProfile() {
     } finally {
         if (qualityBindingMatches(projectId, chapterId)) {
             state.qualityBusy = false;
-            renderQualityWorkspace();
         }
+        finishAuthorityMutation(authorityMutationToken);
+        if (qualityBindingMatches(projectId, chapterId)) renderQualityWorkspace();
     }
 }
 
@@ -5744,6 +6369,7 @@ function renderWorkflowCurrent() {
         || !['apply', 'adopt'].includes(step?.kind)
         || !applyArtifact;
     elements.ss_workflow_cancel.disabled = state.workflowLoading || state.workflowCancelling || !run || !step
+        || (state.workflowBusy && !state.workflowCommandController)
         || ['completed', 'cancelled'].includes(run?.status);
 }
 
@@ -6063,6 +6689,9 @@ async function loadWorkflowRun(runId, { preserveError = false } = {}) {
         const payload = await apiRequest(workflowRunsPath(projectId, chapterId, runId));
         if (!workflowRequestIsCurrent(projectId, chapterId, requestSerial)) return;
         applyWorkflowPayload(payload, { replaceArtifacts: true });
+        if (workflowAuthorityRequiresRefresh()) {
+            await refreshWorkflowAuthority(projectId, chapterId, requestSerial);
+        }
         if (preserveError) state.workflowError = previousError;
     } catch (error) {
         if (!workflowRequestIsCurrent(projectId, chapterId, requestSerial)) return;
@@ -6124,25 +6753,33 @@ async function loadWorkflowWorkspace({ preferredRunId = state.workflowRunId } = 
 }
 
 async function createWorkflowRun(retryBody = null) {
-    if (state.workflowBusy || !state.project || !state.chapter || !state.workflowDefinitionId) return;
-    if (!(await enqueueSave())) return;
-    const projectId = state.project.id;
-    const chapterId = state.chapter.id;
-    const definition = selectedWorkflowDefinition();
-    const body = retryBody || {
-        commandId: workflowCommandId(),
-        definitionId: state.workflowDefinitionId,
-        definitionHash: definition?.definitionHash,
-        projectVersion: state.project.version,
-        chapterRevision: state.chapter.revision,
-        input: {},
-    };
-    const requestSerial = ++state.workflowRequestSerial;
+    const projectId = state.project?.id;
+    const chapterId = state.chapter?.id;
+    const definitionId = state.workflowDefinitionId;
+    if (state.workflowBusy || !projectId || !chapterId || !definitionId
+        || !workflowBindingMatches(projectId, chapterId)) return;
     state.workflowBusy = true;
+    const authorityMutationToken = beginAuthorityMutation('workflow');
     state.workflowError = '';
     state.workflowRetry = null;
     renderWorkflowWorkspace();
+    let body = retryBody;
+    let requestSerial = 0;
     try {
+        if (!(await enqueueSave())) return;
+        if (!workflowBindingMatches(projectId, chapterId)
+            || state.project?.id !== projectId || state.chapter?.id !== chapterId
+            || state.workflowDefinitionId !== definitionId) return;
+        const definition = selectedWorkflowDefinition();
+        body = retryBody || {
+            commandId: workflowCommandId(),
+            definitionId,
+            definitionHash: definition?.definitionHash,
+            projectVersion: state.project.version,
+            chapterRevision: state.chapter.revision,
+            input: {},
+        };
+        requestSerial = ++state.workflowRequestSerial;
         const payload = await apiMutation(workflowRunsPath(projectId, chapterId), {
             method: 'POST',
             body,
@@ -6151,11 +6788,13 @@ async function createWorkflowRun(retryBody = null) {
         applyWorkflowPayload(payload, { replaceArtifacts: true });
         showToast('流程运行已创建');
     } catch (error) {
-        if (!workflowRequestIsCurrent(projectId, chapterId, requestSerial)) return;
+        if ((requestSerial && !workflowRequestIsCurrent(projectId, chapterId, requestSerial))
+            || !workflowBindingMatches(projectId, chapterId)) return;
         state.workflowError = error.message || '无法创建流程运行';
-        state.workflowRetry = { kind: 'create', body };
+        state.workflowRetry = body ? { kind: 'create', body } : null;
     } finally {
-        if (workflowRequestIsCurrent(projectId, chapterId, requestSerial)) {
+        finishAuthorityMutation(authorityMutationToken);
+        if (workflowBindingMatches(projectId, chapterId)) {
             state.workflowBusy = false;
             renderWorkflowWorkspace();
         }
@@ -6167,15 +6806,33 @@ function workflowCommandId() {
     return `workflow.${random}`;
 }
 
+function workflowAuthorityRequiresRefresh(authority = state.workflowAuthority) {
+    return Boolean(authority
+        && (authority.projectVersion !== state.project?.version
+            || authority.chapterRevision !== state.chapter?.revision));
+}
+
 async function refreshWorkflowAuthority(projectId, chapterId, requestSerial) {
-    const [project, chapter] = await Promise.all([
-        apiRequest(pathForProject(projectId)),
-        apiRequest(pathForProject(projectId, `/chapters/${encodeURIComponent(chapterId)}`)),
-    ]);
+    const { project, chapter } = await apiRequest(pathForProject(
+        projectId,
+        `/chapters/${encodeURIComponent(chapterId)}/authority`,
+    ));
     if (!workflowRequestIsCurrent(projectId, chapterId, requestSerial)) return false;
-    acceptServerProject(project, new Set());
-    acceptServerChapter(chapter, new Set());
-    clearDirtyState();
+    acceptServerProject(project);
+    acceptServerChapter(chapter);
+    const hasDirtyEdits = state.projectDirty || state.chapterDirty || state.volumeDirty
+        || state.projectDirtyPaths.size > 0 || state.chapterDirtyPaths.size > 0
+        || state.volumeDirtyFields.size > 0;
+    const hasSavingEdits = state.saveInFlight
+        || state.projectSavingPaths.size > 0 || state.chapterSavingPaths.size > 0
+        || state.volumeSavingFields.size > 0;
+    if (hasDirtyEdits) {
+        scheduleAutosave();
+    } else if (hasSavingEdits) {
+        setSaveStatus('保存中', 'saving');
+    } else {
+        clearDirtyState();
+    }
     renderProjectData();
     return true;
 }
@@ -6185,7 +6842,22 @@ async function sendWorkflowCommand(type, payload = {}, retryDescriptor = null) {
     const chapterId = state.chapter?.id;
     const run = state.workflowRun;
     if (state.workflowBusy || !projectId || !chapterId || !run || !workflowBindingMatches(projectId, chapterId)) return;
-    if (!(await enqueueSave())) return;
+    state.workflowBusy = true;
+    const authorityMutationToken = beginAuthorityMutation('workflow');
+    state.workflowError = '';
+    state.workflowRetry = null;
+    renderWorkflowWorkspace();
+    let saved = false;
+    try {
+        saved = await enqueueSave();
+    } finally {
+        if (!saved) {
+            state.workflowBusy = false;
+            finishAuthorityMutation(authorityMutationToken);
+            renderWorkflowWorkspace();
+        }
+    }
+    if (!saved) return;
     const descriptor = retryDescriptor || {
         commandId: workflowCommandId(),
         runRevision: run.revision,
@@ -6193,9 +6865,6 @@ async function sendWorkflowCommand(type, payload = {}, retryDescriptor = null) {
         payload,
     };
     const requestSerial = ++state.workflowRequestSerial;
-    state.workflowBusy = true;
-    state.workflowError = '';
-    state.workflowRetry = null;
     const commandController = new AbortController();
     state.workflowCommandController = commandController;
     renderWorkflowWorkspace();
@@ -6207,9 +6876,7 @@ async function sendWorkflowCommand(type, payload = {}, retryDescriptor = null) {
         });
         if (!workflowRequestIsCurrent(projectId, chapterId, requestSerial)) return;
         applyWorkflowPayload(response);
-        if (response?.authority
-            && (response.authority.projectVersion !== state.project?.version
-                || response.authority.chapterRevision !== state.chapter?.revision)) {
+        if (workflowAuthorityRequiresRefresh(response?.authority)) {
             await refreshWorkflowAuthority(projectId, chapterId, requestSerial);
         }
     } catch (error) {
@@ -6242,8 +6909,9 @@ async function sendWorkflowCommand(type, payload = {}, retryDescriptor = null) {
         if (state.workflowCommandController === commandController) state.workflowCommandController = null;
         if (workflowRequestIsCurrent(projectId, chapterId, requestSerial)) {
             state.workflowBusy = false;
-            renderWorkflowWorkspace();
         }
+        finishAuthorityMutation(authorityMutationToken);
+        if (workflowRequestIsCurrent(projectId, chapterId, requestSerial)) renderWorkflowWorkspace();
     }
 }
 
@@ -6252,6 +6920,7 @@ async function cancelWorkflowRun(retryDescriptor = null) {
     const chapterId = state.chapter?.id;
     const run = state.workflowRun;
     if (!projectId || !chapterId || !run || !run.currentStepId || state.workflowCancelling
+        || (state.workflowBusy && !state.workflowCommandController)
         || ['completed', 'cancelled'].includes(run.status)
         || !workflowBindingMatches(projectId, chapterId)) return;
     const descriptor = retryDescriptor || {
@@ -6280,10 +6949,38 @@ async function cancelWorkflowRun(retryDescriptor = null) {
         if (state.workflowCommandController === executingController) state.workflowCommandController = null;
         state.workflowBusy = false;
         showToast(response?.command?.replayed ? '取消回执已对账' : '流程运行已取消');
+        try {
+            if (workflowAuthorityRequiresRefresh(response?.authority)) {
+                await refreshWorkflowAuthority(projectId, chapterId, requestSerial);
+            }
+        } catch (refreshError) {
+            if (workflowRequestIsCurrent(projectId, chapterId, requestSerial)) {
+                state.workflowError = `流程已取消；刷新权威状态失败：${refreshError.message || '未知错误'}`;
+                state.workflowRetry = { kind: 'refresh' };
+                renderWorkflowWorkspace();
+            }
+        }
     } catch (error) {
         if (!workflowRequestIsCurrent(projectId, chapterId, requestSerial)) return;
-        state.workflowError = error.message || '无法取消流程运行';
+        const message = error.message || '无法取消流程运行';
+        executingController?.abort(new DOMException('Workflow cancellation request failed.', 'AbortError'));
+        if (state.workflowCommandController === executingController) state.workflowCommandController = null;
+        state.workflowBusy = false;
+        state.workflowCancelling = false;
+        state.workflowError = message;
         state.workflowRetry = { kind: 'cancel', descriptor };
+        renderWorkflowWorkspace();
+        await loadWorkflowRun(run.id, { preserveError: true });
+        if (workflowBindingMatches(projectId, chapterId) && state.workflowRunId === run.id) {
+            const reconciliationError = state.workflowError && state.workflowError !== message
+                ? state.workflowError
+                : '';
+            state.workflowError = reconciliationError
+                ? `${message}；状态对账失败：${reconciliationError}`
+                : message;
+            state.workflowRetry = { kind: 'cancel', descriptor };
+            renderWorkflowWorkspace();
+        }
     } finally {
         if (workflowRequestIsCurrent(projectId, chapterId, requestSerial)) {
             state.workflowCancelling = false;
@@ -6762,14 +7459,17 @@ function renderViewState() {
         button.classList.toggle('is-active', active);
         button.setAttribute('aria-selected', String(active));
         button.tabIndex = active ? 0 : -1;
+        button.disabled = authorityMutationLocked();
     }
     elements.ss_shell.classList.toggle('is-dashboard-view', state.view === 'today');
     elements.ss_shell.classList.toggle('is-resource-view', state.view === 'resources');
     elements.ss_shell.classList.toggle('is-copilot-view', state.view === 'copilot');
     elements.ss_shell.classList.toggle('is-workflow-view', state.view === 'workflow');
     elements.ss_shell.classList.toggle('is-quality-view', state.view === 'quality');
-    elements.ss_toggle_binder.disabled = ['today', 'resources', 'copilot', 'quality'].includes(state.view);
-    elements.ss_toggle_inspector.disabled = ['today', 'resources', 'copilot', 'workflow', 'quality'].includes(state.view);
+    elements.ss_toggle_binder.disabled = authorityMutationLocked()
+        || ['today', 'resources', 'copilot', 'quality'].includes(state.view);
+    elements.ss_toggle_inspector.disabled = authorityMutationLocked()
+        || ['today', 'resources', 'copilot', 'workflow', 'quality'].includes(state.view);
     elements.ss_toggle_inspector.hidden = ['today', 'copilot', 'workflow', 'quality'].includes(state.view);
     if (state.project) persistWorkspaceResumeState();
 }
@@ -6954,6 +7654,7 @@ function resetGenerationWorkspace({ clearInstruction = true } = {}) {
     if (state.generationController && !state.generationController.signal.aborted) {
         state.generationController.abort();
     }
+    cancelContextPreviewRequest();
     state.generationRequestSerial += 1;
     state.generating = false;
     state.generationController = null;
@@ -7065,8 +7766,10 @@ function setLoadedProject(project, chapter) {
     state.volumeBase = selectedVolume(project) ? clone(selectedVolume(project)) : null;
     syncCopilotAuthorityState();
     state.candidateEditSerial += 1;
-    clearDirtyState();
-    upsertProjectSummary(project);
+    restoredWorkspaceRecoverySource = null;
+    clearDirtyState({ preserveRecoveryDraft: true });
+    restoreWorkspaceRecoveryDraft(project, chapter);
+    upsertProjectSummary(state.project);
     renderProjectData();
     persistWorkspaceResumeState();
     if (chapter) void refreshGenerationHistory();
@@ -7552,9 +8255,11 @@ async function loadChapter(chapterId, { pendingPrepared = false } = {}) {
         bindQualityWorkspace(state.project, chapter);
         state.chapterBase = clone(chapter);
         state.candidateEditSerial += 1;
+        restoredWorkspaceRecoverySource = null;
         state.chapterDirty = false;
         state.chapterDirtyPaths.clear();
         setSaveStatus('已保存', 'saved');
+        restoreWorkspaceRecoveryDraft(state.project, chapter);
         renderChapterList();
         renderEditor();
         renderCard();
@@ -7645,6 +8350,7 @@ async function importProject(file) {
 function setView(view) {
     if (!['today', 'write', 'bible', 'ledger', 'copilot', 'workflow', 'resources'].includes(view)
         && view !== 'quality') return;
+    if (!workspaceAuthorityMutationAllowsView(authorityMutationView(), view)) return;
     state.view = view;
     renderViewState();
     if (view === 'today') {
@@ -7722,7 +8428,7 @@ async function refreshAfterResourceConflict(projectId, { preserveProfileDraft = 
     try {
         const project = await apiRequest(pathForProject(projectId));
         if (state.project?.id !== projectId) return;
-        acceptServerProject(project, new Set());
+        acceptServerProject(project);
         renderSaveMetadata();
         if (!preserveProfileDraft || !state.profileEditorDirty) {
             await loadResources();
@@ -7768,14 +8474,15 @@ async function mutateResource(operation, {
     const projectId = state.project.id;
     const navigationEpoch = state.navigationEpoch;
     state.resourceBusy = true;
+    const authorityMutationToken = beginAuthorityMutation('resources');
     renderResources();
     try {
         if (!(await enqueueSave())) return null;
         if (state.project?.id !== projectId || state.navigationEpoch !== navigationEpoch) return null;
         const result = await operation();
         if (state.project?.id !== projectId || state.navigationEpoch !== navigationEpoch) return result;
-        if (result?.project) acceptServerProject(result.project, new Set());
-        else if (result?.id === projectId) acceptServerProject(result, new Set());
+        if (result?.project) acceptServerProject(result.project);
+        else if (result?.id === projectId) acceptServerProject(result);
         renderSaveMetadata();
         await loadResources({ selectType, selectId });
         if (successMessage) showToast(successMessage);
@@ -7792,6 +8499,7 @@ async function mutateResource(operation, {
         return null;
     } finally {
         state.resourceBusy = false;
+        finishAuthorityMutation(authorityMutationToken);
         renderResources();
     }
 }
@@ -8180,7 +8888,7 @@ async function adoptPendingChangeSet() {
         // Adoption may proceed; an inaccessible browser draft cannot be removed afterward.
     }
     state.pendingChangeSetAdopting = true;
-    elements.ss_shell.inert = true;
+    syncShellInert();
     renderPendingChangeSet();
     try {
         if (!(await enqueueSave())) return;
@@ -8234,7 +8942,7 @@ async function adoptPendingChangeSet() {
         showToast(`${error.message || 'ChangeSet 采纳失败'}；草稿已保留`, 5000);
     } finally {
         state.pendingChangeSetAdopting = false;
-        elements.ss_shell.inert = state.navigationBusy;
+        syncShellInert();
         renderPendingChangeSet();
     }
 }
@@ -8538,22 +9246,55 @@ async function previewGeneration() {
     const projectId = state.project.id;
     const chapterId = state.chapter.id;
     const navigationEpoch = state.navigationEpoch;
+    const { controller, requestSerial } = beginContextPreviewRequest();
     elements.ss_generation_preview.disabled = true;
     try {
-        if (!(await enqueueSave())) return;
+        if (!(await enqueueSave())
+            || !contextPreviewRequestIsCurrent(
+                projectId,
+                chapterId,
+                navigationEpoch,
+                requestSerial,
+                controller,
+            )) return;
         const preview = await apiMutation(
             generationPath(projectId, chapterId).replace(/\/generations$/, '/generation-preview'),
-            { method: 'POST', body: generationEnvelope(state.aiKind, 'generate', null, selection) },
+            {
+                method: 'POST',
+                body: generationEnvelope(state.aiKind, 'generate', null, selection),
+                signal: controller.signal,
+            },
         );
-        if (state.project?.id !== projectId || state.chapter?.id !== chapterId
-            || state.navigationEpoch !== navigationEpoch) return;
+        if (!contextPreviewRequestIsCurrent(
+            projectId,
+            chapterId,
+            navigationEpoch,
+            requestSerial,
+            controller,
+        )) return;
         state.generationPreview = preview;
         renderContextPreview();
         elements.ss_context_preview.scrollIntoView({ block: 'nearest' });
     } catch (error) {
+        if (!contextPreviewRequestIsCurrent(
+            projectId,
+            chapterId,
+            navigationEpoch,
+            requestSerial,
+            controller,
+        )) return;
         showToast(error.message || '无法预览生成上下文', 5000);
     } finally {
-        renderGenerationControls();
+        if (contextPreviewRequestIsCurrent(
+            projectId,
+            chapterId,
+            navigationEpoch,
+            requestSerial,
+            controller,
+        )) {
+            state.contextPreviewController = null;
+            renderGenerationControls();
+        }
     }
 }
 
@@ -8562,12 +9303,21 @@ async function previewRetrieval() {
     const projectId = state.project.id;
     const chapterId = state.chapter.id;
     const navigationEpoch = state.navigationEpoch;
+    const { controller, requestSerial } = beginContextPreviewRequest();
     elements.ss_retrieval_preview.disabled = true;
     try {
-        if (!(await enqueueSave())) return;
+        if (!(await enqueueSave())
+            || !contextPreviewRequestIsCurrent(
+                projectId,
+                chapterId,
+                navigationEpoch,
+                requestSerial,
+                controller,
+            )) return;
         const retrieval = retrievalOverridesForRequest({ includeRerank: true });
         const preview = await apiMutation(chapterPath(projectId, chapterId, '/retrieval/preview'), {
             method: 'POST',
+            signal: controller.signal,
             body: {
                 projectVersion: state.project.version,
                 chapterRevision: state.chapter.revision,
@@ -8578,8 +9328,13 @@ async function previewRetrieval() {
                 rerank: retrieval.rerank,
             },
         });
-        if (state.project?.id !== projectId || state.chapter?.id !== chapterId
-            || state.navigationEpoch !== navigationEpoch) return;
+        if (!contextPreviewRequestIsCurrent(
+            projectId,
+            chapterId,
+            navigationEpoch,
+            requestSerial,
+            controller,
+        )) return;
         state.generationPreview = {
             systemPrompt: '',
             prompt: '',
@@ -8590,9 +9345,25 @@ async function previewRetrieval() {
         renderContextPreview();
         elements.ss_context_preview.scrollIntoView({ block: 'nearest' });
     } catch (error) {
+        if (!contextPreviewRequestIsCurrent(
+            projectId,
+            chapterId,
+            navigationEpoch,
+            requestSerial,
+            controller,
+        )) return;
         showToast(error.message || '无法预览检索结果', 5000);
     } finally {
-        renderGenerationControls();
+        if (contextPreviewRequestIsCurrent(
+            projectId,
+            chapterId,
+            navigationEpoch,
+            requestSerial,
+            controller,
+        )) {
+            state.contextPreviewController = null;
+            renderGenerationControls();
+        }
     }
 }
 
@@ -8769,10 +9540,10 @@ async function adoptActiveGeneration(contentMode) {
     const navigationEpoch = state.navigationEpoch;
     const contentOffset = Number(elements.ss_manuscript.selectionStart ?? state.chapter.content.length);
     state.adopting = true;
+    syncShellInert();
     renderCandidate();
     try {
         if (!(await enqueueSave())) return;
-        elements.ss_shell.inert = true;
         const result = await apiMutation(generationPath(
             projectId,
             chapterId,
@@ -8804,7 +9575,7 @@ async function adoptActiveGeneration(contentMode) {
         showToast(error.message || '无法采纳候选', 5000);
     } finally {
         state.adopting = false;
-        elements.ss_shell.inert = state.navigationBusy;
+        syncShellInert();
         renderCandidate();
     }
 }
@@ -9034,6 +9805,7 @@ function closeDrawers(returnFocus = false) {
 }
 
 function toggleDrawer(drawer) {
+    if (authorityMutationLocked()) return;
     if (!mobileMedia?.matches) return;
     if (state.drawer === drawer) {
         closeDrawers(true);
@@ -9053,10 +9825,11 @@ function toggleDrawer(drawer) {
 function syncResponsivePanels() {
     if (!mobileMedia) return;
     const mobile = mobileMedia.matches;
+    const authorityLocked = authorityMutationLocked();
     const inspectorUnavailable = ['today', 'resources', 'workflow', 'quality'].includes(state.view);
     if (!mobile && state.drawer) closeDrawers();
-    elements.ss_binder.inert = mobile && state.drawer !== 'binder';
-    elements.ss_inspector.inert = inspectorUnavailable || mobile && state.drawer !== 'inspector';
+    elements.ss_binder.inert = authorityLocked || mobile && state.drawer !== 'binder';
+    elements.ss_inspector.inert = authorityLocked || inspectorUnavailable || mobile && state.drawer !== 'inspector';
     if (mobile && state.drawer !== 'binder') {
         elements.ss_binder.setAttribute('aria-hidden', 'true');
     } else {
@@ -9635,6 +10408,9 @@ function bindEvents() {
             showToast(error.message || '无法载入候选', 5000);
         });
     });
+    elements.ss_generation_instruction.addEventListener('input', () => {
+        invalidateContextPreview();
+    });
     elements.ss_context_overrides.addEventListener('change', event => {
         const retrievalSelect = event.target.closest('select[data-retrieval-override-id]');
         if (retrievalSelect) {
@@ -9647,25 +10423,21 @@ function bindEvents() {
             renderContextOverrides();
             return;
         }
-        state.generationPreview = null;
+        invalidateContextPreview();
         renderContextOverrides();
-        renderContextPreview();
     });
     elements.ss_clear_retrieval_overrides.addEventListener('click', () => {
         state.retrievalOverrides = emptyRetrievalOverrides();
-        state.generationPreview = null;
+        invalidateContextPreview();
         renderContextOverrides();
-        renderContextPreview();
     });
     elements.ss_retrieval_rerank.addEventListener('change', () => {
-        state.generationPreview = null;
-        renderContextPreview();
+        invalidateContextPreview();
     });
     elements.ss_generation_preview.addEventListener('click', () => void previewGeneration());
     elements.ss_retrieval_preview.addEventListener('click', () => void previewRetrieval());
     elements.ss_close_context_preview.addEventListener('click', () => {
-        state.generationPreview = null;
-        renderContextPreview();
+        invalidateContextPreview();
         elements.ss_inspector.scrollTop = 0;
         elements.ss_generation_preview.focus();
     });
@@ -9708,6 +10480,10 @@ function bindEvents() {
     elements.ss_toggle_inspector.addEventListener('click', () => toggleDrawer('inspector'));
     elements.ss_drawer_scrim.addEventListener('click', () => closeDrawers(true));
     elements.story_studio_workspace.addEventListener('keydown', trapWorkspaceFocus);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') persistLifecycleRecoveryDraft();
+    });
+    window.addEventListener('pagehide', persistLifecycleRecoveryDraft);
     window.addEventListener('beforeunload', event => {
         if (!state.projectDirty && !state.volumeDirty && !state.chapterDirty && !state.pendingChangeSetDirty
             && !state.profileEditorDirty
@@ -9805,6 +10581,7 @@ export async function init() {
     state.initialized = true;
     try {
         mountWorkspace();
+        await workspaceRecoveryWriterLeaseReady;
         await bootstrapApplication();
     } catch (error) {
         state.initialized = false;

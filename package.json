@@ -19,6 +19,8 @@
     "start": "node server.js",
     "mock-provider": "node scripts/mock-provider-server.js",
     "test": "node --test --test-reporter=spec",
+    "test:browser": "playwright test",
+    "test:browser:install": "playwright install chromium",
     "check": "node scripts/check-js.js",
     "docs:check": "node scripts/check-docs.js",
     "quality:run": "node scripts/quality-regression-cli.js run",
@@ -50,6 +52,7 @@
     "write-file-atomic": "5.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "supertest": "^7.2.2"
   }
 }

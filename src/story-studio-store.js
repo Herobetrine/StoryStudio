@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import writeFileAtomic, { sync as writeFileAtomicSync } from 'write-file-atomic';
 
+import { createStoragePathGuard } from './api-error.js';
 import {
     CompatImportError,
     createResourceRecord,
@@ -186,6 +187,7 @@ const RESOURCE_EXPORT_BY_TYPE = Object.freeze({
 const RESOURCE_TYPES = Object.keys(RESOURCE_DIRECTORY_BY_TYPE);
 const MAX_RESOURCE_REFERENCES = 10_000;
 const MAX_RESOURCE_JOURNAL_OPERATIONS = RESOURCE_TYPES.length * MAX_RESOURCE_REFERENCES * 2;
+const PROJECT_WRITE_JOURNAL_FILE = '.pending-write.json';
 const RESOURCE_JOURNAL_FILE = '.pending-resource-write.json';
 const CHAPTER_OPERATIONS_JOURNAL_FILE = '.pending-chapter-operations.json';
 const SCHEMA_MIGRATION_JOURNAL_FILE = '.pending-schema-migration.json';
@@ -1379,31 +1381,60 @@ export class StoryStudioStore {
      * @param {{ migrationBackupsDirectory?: string }} [options] Store paths outside the project tree
      */
     constructor(rootDirectory, options = {}) {
-        this.rootDirectory = path.resolve(rootDirectory);
-        this.projectsDirectory = path.join(this.rootDirectory, 'projects');
+        this.projectStorageGuard = createStoragePathGuard(rootDirectory, {
+            label: 'Story Studio storage',
+            createError: (message, details) => (
+                new StoryStudioError(message, 500, 'invalid_storage', details)
+            ),
+        });
+        this.rootDirectory = this.projectStorageGuard.rootDirectory;
+        this.projectsDirectory = this.projectStorageGuard.resolvePath('projects');
         this.migrationBackupsDirectory = path.resolve(
             options.migrationBackupsDirectory ?? path.join(this.rootDirectory, 'migration-backups'),
         );
         if (pathsOverlap(this.projectsDirectory, this.migrationBackupsDirectory)) {
             throw new StoryStudioError('Migration backups must be outside the projects tree.', 500, 'invalid_storage');
         }
+        this.migrationBackupStorageGuard = createStoragePathGuard(this.migrationBackupsDirectory, {
+            label: 'Story Studio migration backup storage',
+            createError: (message, details) => (
+                new StoryStudioError(message, 500, 'invalid_storage', details)
+            ),
+        });
+        this.migrationBackupsDirectory = this.migrationBackupStorageGuard.rootDirectory;
         this.maxProjectChapters = MAX_IMPORT_CHAPTERS;
         this.maxProjectBytes = MAX_IMPORT_BYTES;
         this.lockStaleMs = LOCK_STALE_MS;
         this.lockHeartbeatMs = LOCK_HEARTBEAT_MS;
         this.stagingStaleMs = STAGING_STALE_MS;
         this.stagingHardStaleMs = STAGING_HARD_STALE_MS;
-        fs.mkdirSync(this.projectsDirectory, { recursive: true });
+        this.projectStorageGuard.ensureDirectory(this.projectsDirectory);
+        this.assertProjectStoragePath(this.projectsDirectory);
         if (!CLEANED_STAGING_ROOTS.has(this.projectsDirectory)) {
             CLEANED_STAGING_ROOTS.add(this.projectsDirectory);
             this.cleanupStaleStagingDirectories();
         }
     }
 
+    assertProjectStoragePath(target) {
+        const resolved = this.projectStorageGuard.assertPath(target);
+        if (!isPathContained(this.projectsDirectory, resolved)) {
+            throw new StoryStudioError('Project storage path escaped its root.', 500, 'invalid_storage', {
+                path: resolved,
+            });
+        }
+        return resolved;
+    }
+
+    projectStoragePath(...segments) {
+        return this.assertProjectStoragePath(path.resolve(this.projectsDirectory, ...segments));
+    }
+
     cleanupStaleStagingDirectories(referenceTime = Date.now()) {
+        this.assertProjectStoragePath(this.projectsDirectory);
         for (const entry of fs.readdirSync(this.projectsDirectory, { withFileTypes: true })) {
             if (!entry.isDirectory() || !STAGING_DIRECTORY.test(entry.name)) continue;
-            const stagingPath = path.join(this.projectsDirectory, entry.name);
+            const stagingPath = this.projectStoragePath(entry.name);
             try {
                 const stat = fs.lstatSync(stagingPath);
                 const age = referenceTime - stat.mtimeMs;
@@ -1423,78 +1454,106 @@ export class StoryStudioStore {
     }
 
     projectDirectory(projectId) {
-        return path.join(this.projectsDirectory, assertId(projectId, 'project id'));
+        return this.projectStoragePath(assertId(projectId, 'project id'));
     }
 
     projectPath(projectId) {
-        return path.join(this.projectDirectory(projectId), 'project.json');
+        return this.projectStoragePath(assertId(projectId, 'project id'), 'project.json');
     }
 
     chapterPath(projectId, chapterId) {
-        return path.join(this.projectDirectory(projectId), 'chapters', `${assertId(chapterId, 'chapter id')}.json`);
+        return this.projectStoragePath(
+            assertId(projectId, 'project id'),
+            'chapters',
+            `${assertId(chapterId, 'chapter id')}.json`,
+        );
     }
 
     resourcesDirectory(projectId) {
-        return path.join(this.projectDirectory(projectId), 'resources');
+        return this.projectStoragePath(assertId(projectId, 'project id'), 'resources');
     }
 
     resourceDirectory(projectId, typeValue) {
         const type = normalizeResourceType(typeValue);
-        return path.join(this.resourcesDirectory(projectId), RESOURCE_DIRECTORY_BY_TYPE[type]);
+        return this.projectStoragePath(
+            assertId(projectId, 'project id'),
+            'resources',
+            RESOURCE_DIRECTORY_BY_TYPE[type],
+        );
     }
 
     resourcePath(projectId, typeValue, resourceId) {
-        return path.join(this.resourceDirectory(projectId, typeValue), `${assertId(resourceId, 'resource id')}.json`);
+        const type = normalizeResourceType(typeValue);
+        return this.projectStoragePath(
+            assertId(projectId, 'project id'),
+            'resources',
+            RESOURCE_DIRECTORY_BY_TYPE[type],
+            `${assertId(resourceId, 'resource id')}.json`,
+        );
     }
 
     resourceJournalPath(projectId) {
-        return path.join(this.projectDirectory(projectId), RESOURCE_JOURNAL_FILE);
+        return this.projectStoragePath(assertId(projectId, 'project id'), RESOURCE_JOURNAL_FILE);
+    }
+
+    projectWriteJournalPath(projectId) {
+        return this.projectStoragePath(assertId(projectId, 'project id'), PROJECT_WRITE_JOURNAL_FILE);
     }
 
     chapterOperationsJournalPath(projectId) {
-        return path.join(this.projectDirectory(projectId), CHAPTER_OPERATIONS_JOURNAL_FILE);
+        return this.projectStoragePath(assertId(projectId, 'project id'), CHAPTER_OPERATIONS_JOURNAL_FILE);
     }
 
     schemaMigrationJournalPath(projectId) {
-        return path.join(this.projectDirectory(projectId), SCHEMA_MIGRATION_JOURNAL_FILE);
+        return this.projectStoragePath(assertId(projectId, 'project id'), SCHEMA_MIGRATION_JOURNAL_FILE);
+    }
+
+    migrationBackupStoragePath(...segments) {
+        return this.migrationBackupStorageGuard.resolvePath(...segments);
     }
 
     migrationBackupDirectory(projectId, transactionId) {
-        return path.join(
-            this.migrationBackupsDirectory,
+        return this.migrationBackupStoragePath(
             assertId(projectId, 'project id'),
             assertId(transactionId, 'transaction id'),
         );
     }
 
     migrationBackupManifestPath(projectId, transactionId) {
-        return path.join(this.migrationBackupDirectory(projectId, transactionId), 'manifest.json');
+        return this.migrationBackupStoragePath(
+            assertId(projectId, 'project id'),
+            assertId(transactionId, 'transaction id'),
+            'manifest.json',
+        );
     }
 
     migrationBackupSnapshotDirectory(projectId, transactionId) {
-        return path.join(this.migrationBackupDirectory(projectId, transactionId), 'snapshot');
+        return this.migrationBackupStoragePath(
+            assertId(projectId, 'project id'),
+            assertId(transactionId, 'transaction id'),
+            'snapshot',
+        );
     }
 
     assertMigrationBackupDirectory(directory, label, containmentRoot = null) {
-        const stat = lstatIfPresent(directory);
+        const guardedDirectory = this.migrationBackupStorageGuard.assertPath(directory);
+        const stat = lstatIfPresent(guardedDirectory);
         if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) {
             throw new StoryStudioError(`${label} must be a real directory.`, 500, 'invalid_storage', {
-                path: directory,
+                path: guardedDirectory,
             });
         }
-        const realDirectory = fs.realpathSync.native(directory);
+        const realDirectory = fs.realpathSync.native(guardedDirectory);
         if (containmentRoot !== null && !isPathContained(containmentRoot, realDirectory)) {
             throw new StoryStudioError(`${label} escapes the migration backup root.`, 500, 'invalid_storage', {
-                path: directory,
+                path: guardedDirectory,
             });
         }
         return realDirectory;
     }
 
     ensureMigrationBackupRootUnlocked() {
-        if (lstatIfPresent(this.migrationBackupsDirectory) === null) {
-            fs.mkdirSync(this.migrationBackupsDirectory, { recursive: true });
-        }
+        this.migrationBackupStorageGuard.ensureDirectory(this.migrationBackupsDirectory);
         const backupRoot = this.assertMigrationBackupDirectory(
             this.migrationBackupsDirectory,
             'Migration backup root',
@@ -1507,10 +1566,7 @@ export class StoryStudioStore {
     }
 
     ensureMigrationBackupProjectDirectoryUnlocked(projectId, backupRoot) {
-        const projectBackupDirectory = path.join(
-            this.migrationBackupsDirectory,
-            assertId(projectId, 'project id'),
-        );
+        const projectBackupDirectory = this.migrationBackupStoragePath(assertId(projectId, 'project id'));
         if (lstatIfPresent(projectBackupDirectory) === null) fs.mkdirSync(projectBackupDirectory);
         const realProjectBackupDirectory = this.assertMigrationBackupDirectory(
             projectBackupDirectory,
@@ -1528,10 +1584,7 @@ export class StoryStudioStore {
             this.migrationBackupsDirectory,
             'Migration backup root',
         );
-        const projectBackupDirectory = path.join(
-            this.migrationBackupsDirectory,
-            assertId(projectId, 'project id'),
-        );
+        const projectBackupDirectory = this.migrationBackupStoragePath(assertId(projectId, 'project id'));
         const realProjectBackupDirectory = this.assertMigrationBackupDirectory(
             projectBackupDirectory,
             'Migration backup project directory',
@@ -1850,6 +1903,7 @@ export class StoryStudioStore {
 
     listProjects() {
         const projects = [];
+        this.assertProjectStoragePath(this.projectsDirectory);
         for (const entry of fs.readdirSync(this.projectsDirectory, { withFileTypes: true })) {
             if (!entry.isDirectory() || !VALID_ID.test(entry.name)) {
                 continue;
@@ -1905,6 +1959,137 @@ export class StoryStudioStore {
 
     getProject(projectId) {
         return this.withProjectLock(projectId, () => this.readProjectUnlocked(projectId));
+    }
+
+    assertProjectExistsReadOnly(projectId) {
+        const filePath = this.projectPath(projectId);
+        const stat = lstatIfPresent(filePath);
+        if (!stat) throw new StoryStudioError('Project not found.', 404, 'not_found');
+        if (!stat.isFile() || stat.isSymbolicLink()) {
+            throw new StoryStudioError('Project storage path is invalid.', 500, 'invalid_storage', {
+                path: filePath,
+            });
+        }
+        return true;
+    }
+
+    assertNoPendingRecoveryReadOnly(projectId) {
+        const journals = [
+            ['project-write', this.projectWriteJournalPath(projectId)],
+            ['chapter-operations', this.chapterOperationsJournalPath(projectId)],
+            ['resource-write', this.resourceJournalPath(projectId)],
+            ['schema-migration', this.schemaMigrationJournalPath(projectId)],
+        ];
+        for (const [journal, filePath] of journals) {
+            const stat = lstatIfPresent(filePath);
+            if (!stat) continue;
+            if (!stat.isFile() || stat.isSymbolicLink()) {
+                throw new StoryStudioError('Project recovery journal path is invalid.', 500, 'invalid_storage', {
+                    journal,
+                });
+            }
+            throw new StoryStudioError(
+                'Project recovery must be completed by a write request before read-only access.',
+                409,
+                'recovery_required',
+                { journal },
+            );
+        }
+    }
+
+    readOnlyFileDigest(filePath, missingMessage) {
+        const stat = lstatIfPresent(filePath);
+        if (!stat) throw new StoryStudioError(missingMessage, 404, 'not_found');
+        if (!stat.isFile() || stat.isSymbolicLink()) {
+            throw new StoryStudioError('Authority storage path is invalid.', 500, 'invalid_storage');
+        }
+        try {
+            return sha256Bytes(fs.readFileSync(filePath));
+        } catch (error) {
+            if (error.code === 'ENOENT') {
+                throw new StoryStudioError(
+                    'Authority changed while it was being read.',
+                    409,
+                    'project_busy',
+                    { retryAfterMs: 100 },
+                );
+            }
+            throw new StoryStudioError('Could not read authority storage.', 500, 'invalid_storage', {
+                cause: error.message,
+            });
+        }
+    }
+
+    getProjectAndChapterReadOnly(projectId, chapterId) {
+        const normalizedProjectId = assertId(projectId, 'project id');
+        const normalizedChapterId = assertId(chapterId, 'chapter id');
+        this.assertProjectExistsReadOnly(normalizedProjectId);
+        this.assertNoPendingRecoveryReadOnly(normalizedProjectId);
+
+        const projectPath = this.projectPath(normalizedProjectId);
+        const projectDigest = this.readOnlyFileDigest(projectPath, 'Project not found.');
+        const project = this.readProjectUnlocked(normalizedProjectId);
+        const summary = project.chapters.find(item => item.id === normalizedChapterId);
+        if (!summary) throw new StoryStudioError('Chapter not found.', 404, 'not_found');
+
+        const chapterPath = this.chapterPath(normalizedProjectId, normalizedChapterId);
+        const chapterDigest = this.readOnlyFileDigest(chapterPath, 'Chapter not found.');
+        const chapter = this.readChapterUnlocked(normalizedProjectId, normalizedChapterId);
+        if (stableJson(chapterSummary(chapter)) !== stableJson(summary)) {
+            throw new StoryStudioError('Project chapter index does not match chapter storage.', 500, 'invalid_storage', {
+                chapterId: normalizedChapterId,
+            });
+        }
+
+        this.assertNoPendingRecoveryReadOnly(normalizedProjectId);
+        if (this.readOnlyFileDigest(projectPath, 'Project not found.') !== projectDigest
+            || this.readOnlyFileDigest(chapterPath, 'Chapter not found.') !== chapterDigest) {
+            throw new StoryStudioError(
+                'Authority changed while it was being read.',
+                409,
+                'project_busy',
+                { retryAfterMs: 100 },
+            );
+        }
+        return { project, chapter };
+    }
+
+    getProjectVersionReadOnly(projectId) {
+        this.assertProjectExistsReadOnly(projectId);
+        const project = readJson(this.projectPath(projectId), 'Project not found.');
+        if (!project || typeof project !== 'object' || Array.isArray(project)
+            || project.id !== projectId || !Number.isSafeInteger(project.version) || project.version < 1) {
+            throw new StoryStudioError('Project storage record is invalid.', 500, 'invalid_storage');
+        }
+        return project.version;
+    }
+
+    assertChapterExistsReadOnly(projectId, chapterId) {
+        const normalizedProjectId = assertId(projectId, 'project id');
+        const normalizedChapterId = assertId(chapterId, 'chapter id');
+        this.assertProjectExistsReadOnly(normalizedProjectId);
+        const project = readJson(this.projectPath(normalizedProjectId), 'Project not found.');
+        if (!project || typeof project !== 'object' || Array.isArray(project)
+            || project.id !== normalizedProjectId || !Array.isArray(project.chapters)) {
+            throw new StoryStudioError('Project storage record is invalid.', 500, 'invalid_storage');
+        }
+        if (!project.chapters.some(chapter => chapter?.id === normalizedChapterId)) {
+            throw new StoryStudioError('Chapter not found.', 404, 'not_found');
+        }
+        const filePath = this.chapterPath(normalizedProjectId, normalizedChapterId);
+        const stat = lstatIfPresent(filePath);
+        if (!stat) throw new StoryStudioError('Chapter not found.', 404, 'not_found');
+        if (!stat.isFile() || stat.isSymbolicLink()) {
+            throw new StoryStudioError('Chapter storage path is invalid.', 500, 'invalid_storage', {
+                path: filePath,
+            });
+        }
+        const chapter = readJson(filePath, 'Chapter not found.');
+        if (!chapter || typeof chapter !== 'object' || Array.isArray(chapter)
+            || chapter.id !== normalizedChapterId || chapter.projectId !== normalizedProjectId) {
+            throw new StoryStudioError('Chapter storage record is invalid.', 500, 'invalid_storage');
+        }
+        return true;
     }
 
     updateProject(projectId, expectedVersion, changes = {}) {
@@ -2990,13 +3175,17 @@ export class StoryStudioStore {
         };
         this.assertProjectResourceLimits(project, resourceBytes, resourceRecords.length);
         assertPayloadSize(project, MAX_PROJECT_BYTES, 'Project');
-        const stagingDirectory = path.join(this.projectsDirectory, `.staging-${id}`);
+        const stagingName = `.staging-${id}`;
+        const stagingDirectory = this.projectStoragePath(stagingName);
         const destinationDirectory = this.projectDirectory(id);
-        const stagingOwnerPath = path.join(stagingDirectory, STAGING_OWNER_FILE);
+        const stagingOwnerPath = this.projectStoragePath(stagingName, STAGING_OWNER_FILE);
         try {
-            await fs.promises.mkdir(path.join(stagingDirectory, 'chapters'), { recursive: true });
+            await fs.promises.mkdir(this.projectStoragePath(stagingName, 'chapters'), { recursive: true });
             for (const directoryName of Object.values(RESOURCE_DIRECTORY_BY_TYPE)) {
-                await fs.promises.mkdir(path.join(stagingDirectory, 'resources', directoryName), { recursive: true });
+                await fs.promises.mkdir(
+                    this.projectStoragePath(stagingName, 'resources', directoryName),
+                    { recursive: true },
+                );
             }
             await writeJsonAsync(stagingOwnerPath, {
                 token: randomUUID(),
@@ -3005,15 +3194,23 @@ export class StoryStudioStore {
                 createdAt: timestamp,
             });
             for (const chapter of chapters) {
-                await writeJsonAsync(path.join(stagingDirectory, 'chapters', `${chapter.id}.json`), chapter);
+                await writeJsonAsync(
+                    this.projectStoragePath(stagingName, 'chapters', `${chapter.id}.json`),
+                    chapter,
+                );
             }
             for (const resource of resourceRecords) {
                 await writeJsonAsync(
-                    path.join(stagingDirectory, 'resources', RESOURCE_DIRECTORY_BY_TYPE[resource.type], `${resource.id}.json`),
+                    this.projectStoragePath(
+                        stagingName,
+                        'resources',
+                        RESOURCE_DIRECTORY_BY_TYPE[resource.type],
+                        `${resource.id}.json`,
+                    ),
                     resource,
                 );
             }
-            await writeJsonAsync(path.join(stagingDirectory, 'project.json'), project);
+            await writeJsonAsync(this.projectStoragePath(stagingName, 'project.json'), project);
             await fs.promises.rm(stagingOwnerPath, { force: true });
             await fs.promises.rename(stagingDirectory, destinationDirectory);
         } catch (error) {
@@ -3447,8 +3644,8 @@ export class StoryStudioStore {
             : this.legacyChapterFilesMatchProjectIndexUnlocked(projectId, currentProject);
         if (!currentProjectIsCoherent) block();
         this.assertProjectLockOwnership(lock);
-        const conflictPath = path.join(
-            this.projectDirectory(projectId),
+        const conflictPath = this.projectStoragePath(
+            assertId(projectId, 'project id'),
             `.pending-schema-migration.conflict-${journal.transactionId}-${Date.now()}.json`,
         );
         fs.renameSync(journalPath, conflictPath);
@@ -3456,15 +3653,22 @@ export class StoryStudioStore {
     }
 
     writeNewProjectSync(project, chapters) {
-        const stagingDirectory = path.join(this.projectsDirectory, `.staging-${project.id}`);
+        const stagingName = `.staging-${project.id}`;
+        const stagingDirectory = this.projectStoragePath(stagingName);
         try {
             for (const directoryName of Object.values(RESOURCE_DIRECTORY_BY_TYPE)) {
-                fs.mkdirSync(path.join(stagingDirectory, 'resources', directoryName), { recursive: true });
+                fs.mkdirSync(
+                    this.projectStoragePath(stagingName, 'resources', directoryName),
+                    { recursive: true },
+                );
             }
             for (const chapter of chapters) {
-                writeJson(path.join(stagingDirectory, 'chapters', `${chapter.id}.json`), chapter);
+                writeJson(
+                    this.projectStoragePath(stagingName, 'chapters', `${chapter.id}.json`),
+                    chapter,
+                );
             }
-            writeJson(path.join(stagingDirectory, 'project.json'), project);
+            writeJson(this.projectStoragePath(stagingName, 'project.json'), project);
             fs.renameSync(stagingDirectory, this.projectDirectory(project.id));
         } catch (error) {
             fs.rmSync(stagingDirectory, { recursive: true, force: true });
@@ -3493,7 +3697,7 @@ export class StoryStudioStore {
         if (!this.chapterProjectTransitionMatches(baseProject, project, chapter, baseChapter)) {
             throw new StoryStudioError('Chapter transaction changes unrelated project fields.', 500, 'invalid_storage');
         }
-        const journalPath = path.join(this.projectDirectory(project.id), '.pending-write.json');
+        const journalPath = this.projectWriteJournalPath(project.id);
         this.assertProjectLockOwnership(lock);
         writeJson(journalPath, {
             transactionId: randomUUID(),
@@ -4535,7 +4739,7 @@ export class StoryStudioStore {
     }
 
     recoverProjectUnlocked(projectId, lock) {
-        const journalPath = path.join(this.projectDirectory(projectId), '.pending-write.json');
+        const journalPath = this.projectWriteJournalPath(projectId);
         if (!fs.existsSync(journalPath)) return;
         let journal;
         let baseProjectVersion;
@@ -4643,8 +4847,8 @@ export class StoryStudioStore {
             blockRecovery();
         }
         this.assertProjectLockOwnership(lock);
-        const conflictPath = path.join(
-            this.projectDirectory(projectId),
+        const conflictPath = this.projectStoragePath(
+            assertId(projectId, 'project id'),
             `.pending-write.conflict-${journal.transactionId}-${Date.now()}.json`,
         );
         fs.renameSync(journalPath, conflictPath);
@@ -4745,8 +4949,8 @@ export class StoryStudioStore {
             blockRecovery();
         }
         this.assertProjectLockOwnership(lock);
-        const conflictPath = path.join(
-            this.projectDirectory(projectId),
+        const conflictPath = this.projectStoragePath(
+            assertId(projectId, 'project id'),
             `.pending-chapter-operations.conflict-${journal.transactionId}-${Date.now()}.json`,
         );
         fs.renameSync(journalPath, conflictPath);
@@ -4817,8 +5021,8 @@ export class StoryStudioStore {
                 blockRecovery();
             }
             this.assertProjectLockOwnership(lock);
-            const conflictPath = path.join(
-                this.projectDirectory(projectId),
+            const conflictPath = this.projectStoragePath(
+                assertId(projectId, 'project id'),
                 `.pending-resource-write.conflict-${journal.transactionId}-${Date.now()}.json`,
             );
             fs.renameSync(journalPath, conflictPath);
@@ -4835,7 +5039,7 @@ export class StoryStudioStore {
     }
 
     lockPath(projectId) {
-        return path.join(this.projectsDirectory, `${assertId(projectId, 'project id')}.lock`);
+        return this.projectStoragePath(`${assertId(projectId, 'project id')}.lock`);
     }
 
     projectLockSnapshot(lockPath) {

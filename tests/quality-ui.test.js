@@ -65,7 +65,8 @@ describe('first-class quality workspace UI contract', () => {
         assert.match(copySource, /projectVersion:\s*state\.project\.version/);
         assert.match(copySource, /name:\s*elements\.ss_quality_copy_name\.value\.trim\(\)/);
         assert.match(copySource, /genreOverlay:\s*state\.qualityOverlayId/);
-        assert.match(copySource, /acceptServerProject\(result\.project,\s*new Set\(\)\)/);
+        assert.match(copySource, /acceptServerProject\(result\.project\);/);
+        assert.doesNotMatch(copySource, /acceptServerProject\([^)]*new Set\(\)/);
         assert.match(copySource, /result\.resource\?\.name/);
 
         assert.match(app, /ss_quality_profile_catalog\.addEventListener\('click'/);

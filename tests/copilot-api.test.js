@@ -412,6 +412,129 @@ describe('independent read-only planning Copilot API', () => {
         assert.equal(unchanged.body.status, 'draft');
     });
 
+    test('keeps GET session reads byte-for-byte read-only and reconciles interrupted attempts only through CSRF writes', async () => {
+        const created = await write(request(app).post('/api/story-studio/projects'), csrfToken).send({
+            title: '只读会话对账样本',
+        }).expect(201);
+        const project = created.body.project;
+        const selection = { volumeIds: [], chapterIds: [], entityIds: [], lorebookIds: [] };
+        const preview = await write(
+            request(app).post(`/api/story-studio/projects/${project.id}/copilot/context-preview`),
+            csrfToken,
+        ).send({ projectVersion: project.version, selection }).expect(200);
+        const session = await write(
+            request(app).post(`/api/story-studio/projects/${project.id}/copilot/sessions`),
+            csrfToken,
+        ).send({
+            commandId: 'create-read-only-session',
+            projectVersion: project.version,
+            selection,
+            contextDigest: preview.body.contextDigest,
+            selectedEvidenceIds: [preview.body.evidenceCatalog[0].evidenceId],
+            optionCount: 3,
+            instruction: '',
+        }).expect(201);
+
+        const sessionPath = path.join(
+            dataRoot,
+            'copilot',
+            'projects',
+            project.id,
+            'sessions',
+            `${session.body.id}.json`,
+        );
+        const persisted = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+        const startedAt = new Date('2025-01-02T03:04:05.000Z').toISOString();
+        persisted.status = 'generating';
+        persisted.error = '';
+        persisted.attempts.push({
+            number: 1,
+            commandId: 'generate-before-restart',
+            requestDigest: 'b'.repeat(64),
+            status: 'generating',
+            raw: '',
+            error: '',
+            startedAt,
+            finishedAt: null,
+            model: '',
+            usage: null,
+            finishReason: '',
+        });
+        fs.writeFileSync(sessionPath, JSON.stringify(persisted, null, 2), 'utf8');
+        const fixedMtime = new Date('2025-01-02T03:04:06.000Z');
+        fs.utimesSync(sessionPath, fixedMtime, fixedMtime);
+        const beforeBytes = fs.readFileSync(sessionPath);
+        const beforeMtimeNs = fs.statSync(sessionPath, { bigint: true }).mtimeNs;
+        const projectsDirectory = path.join(dataRoot, 'story-studio', 'projects');
+        fs.utimesSync(projectsDirectory, fixedMtime, fixedMtime);
+        const projectsMtimeNs = fs.statSync(projectsDirectory, { bigint: true }).mtimeNs;
+
+        const detail = await request(app)
+            .get(`/api/story-studio/projects/${project.id}/copilot/sessions/${session.body.id}`)
+            .set('Host', LOCAL_HOST)
+            .expect(200);
+        assert.equal(detail.body.status, 'generating');
+        assert.equal(detail.body.revision, session.body.revision);
+        const listed = await request(app)
+            .get(`/api/story-studio/projects/${project.id}/copilot/sessions`)
+            .set('Host', LOCAL_HOST)
+            .expect(200);
+        assert.equal(listed.body.sessions[0].status, 'generating');
+        assert.equal(listed.body.sessions[0].revision, session.body.revision);
+        assert.deepEqual(fs.readFileSync(sessionPath), beforeBytes);
+        assert.equal(fs.statSync(sessionPath, { bigint: true }).mtimeNs, beforeMtimeNs);
+        assert.equal(fs.statSync(projectsDirectory, { bigint: true }).mtimeNs, projectsMtimeNs);
+        assert.equal(fs.existsSync(path.join(projectsDirectory, `${project.id}.lock`)), false);
+
+        await request(app)
+            .post(`/api/story-studio/projects/${project.id}/copilot/sessions/reconcile`)
+            .set('Host', LOCAL_HOST)
+            .send({})
+            .expect(403);
+        assert.deepEqual(fs.readFileSync(sessionPath), beforeBytes);
+        assert.equal(fs.statSync(sessionPath, { bigint: true }).mtimeNs, beforeMtimeNs);
+
+        const reconciled = await write(
+            request(app).post(`/api/story-studio/projects/${project.id}/copilot/sessions/reconcile`),
+            csrfToken,
+        ).send({}).expect(200);
+        assert.deepEqual(reconciled.body.recoveredSessionIds, [session.body.id]);
+        assert.equal(reconciled.body.sessions[0].status, 'failed');
+        assert.equal(reconciled.body.sessions[0].revision, session.body.revision + 1);
+
+        const storedAfterReconcile = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+        assert.equal(storedAfterReconcile.status, 'failed');
+        assert.equal(storedAfterReconcile.revision, session.body.revision + 1);
+        assert.equal(storedAfterReconcile.attempts[0].status, 'interrupted');
+        assert.match(storedAfterReconcile.error, /restarted/);
+
+        const reconciledBytes = fs.readFileSync(sessionPath);
+        const reconciledMtimeNs = fs.statSync(sessionPath, { bigint: true }).mtimeNs;
+        const replay = await write(
+            request(app).post(`/api/story-studio/projects/${project.id}/copilot/sessions/reconcile`),
+            csrfToken,
+        ).send({}).expect(200);
+        assert.deepEqual(replay.body.recoveredSessionIds, []);
+        assert.deepEqual(fs.readFileSync(sessionPath), reconciledBytes);
+        assert.equal(fs.statSync(sessionPath, { bigint: true }).mtimeNs, reconciledMtimeNs);
+
+        fs.rmSync(path.join(dataRoot, 'story-studio', 'projects', project.id), {
+            recursive: true,
+            force: true,
+        });
+        await request(app)
+            .get(`/api/story-studio/projects/${project.id}/copilot/sessions/${session.body.id}`)
+            .set('Host', LOCAL_HOST)
+            .expect(404, { error: 'not_found', message: 'Resource not found.' });
+    });
+
+    test('keeps the existing not_found contract for a read-only list of an unknown project', async () => {
+        await request(app)
+            .get('/api/story-studio/projects/missing-project/copilot/sessions')
+            .set('Host', LOCAL_HOST)
+            .expect(404, { error: 'not_found', message: 'Resource not found.' });
+    });
+
     test('uses a project Prompt Profile V2 without activating it for normal writing', async () => {
         const created = await write(request(app).post('/api/story-studio/projects'), csrfToken).send({
             title: '独立 Profile 样本',
@@ -518,6 +641,13 @@ describe('independent read-only planning Copilot API', () => {
             await new Promise(resolve => setTimeout(resolve, 10));
         }
         assert.equal(running.body.status, 'generating');
+        const liveReconciliation = await write(
+            request(app).post(`/api/story-studio/projects/${project.id}/copilot/sessions/reconcile`),
+            csrfToken,
+        ).send({}).expect(200);
+        assert.deepEqual(liveReconciliation.body.recoveredSessionIds, []);
+        assert.equal(liveReconciliation.body.sessions[0].status, 'generating');
+        assert.equal(liveReconciliation.body.sessions[0].revision, running.body.revision);
         await write(
             request(app).post(`/api/story-studio/projects/${project.id}/copilot/sessions/${session.body.id}/cancel`),
             csrfToken,

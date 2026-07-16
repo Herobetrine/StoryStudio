@@ -169,9 +169,9 @@ function createLegacyProject(schemaVersion, {
     return { store, project, chapters };
 }
 
-function createV4Project(directoryName = 'schema-4') {
+function createV4Project(directoryName = 'schema-4', backupRootOverride = null) {
     const storeRoot = path.join(rootDirectory, directoryName);
-    const backupRoot = path.join(rootDirectory, `${directoryName}-backups`);
+    const backupRoot = backupRootOverride ?? path.join(rootDirectory, `${directoryName}-backups`);
     const store = new StoryStudioStore(storeRoot, { migrationBackupsDirectory: backupRoot });
     let result = store.createProject({ title: 'V4 preserve project', genre: '玄幻' });
     const addedVolume = store.createVolume(result.project.id, result.project.version, {
@@ -511,6 +511,16 @@ describe('Schema V5 legacy migration', () => {
         assert.equal(readJson(path.join(backupDirectory, 'manifest.json')).format, 'story-studio-migration-backup-v1');
     });
 
+    test('initializes an empty backup root without creating migration content', () => {
+        const storeRoot = path.join(rootDirectory, 'empty-backup-store');
+        const backupRoot = path.join(rootDirectory, 'empty-backup-root');
+        const store = new StoryStudioStore(storeRoot, { migrationBackupsDirectory: backupRoot });
+        store.createProject({ title: '无需迁移的当前项目' });
+
+        assert.equal(fs.statSync(backupRoot).isDirectory(), true);
+        assert.deepEqual(fs.readdirSync(backupRoot), []);
+    });
+
     test('rejects linked backup roots and project directories without writing outside the backup root', () => {
         for (const linkLevel of ['root', 'project']) {
             const fixture = createV4Project(`v4-linked-backup-${linkLevel}`);
@@ -518,13 +528,13 @@ describe('Schema V5 legacy migration', () => {
             fs.mkdirSync(externalDirectory);
             fs.writeFileSync(path.join(externalDirectory, 'marker.txt'), 'unchanged', 'utf8');
             if (linkLevel === 'root') {
+                fs.rmSync(fixture.backupRoot, { recursive: true, force: true });
                 fs.symlinkSync(
                     externalDirectory,
                     fixture.backupRoot,
                     process.platform === 'win32' ? 'junction' : 'dir',
                 );
             } else {
-                fs.mkdirSync(fixture.backupRoot);
                 fs.symlinkSync(
                     externalDirectory,
                     path.join(fixture.backupRoot, fixture.project.id),
@@ -543,6 +553,63 @@ describe('Schema V5 legacy migration', () => {
                 assert.deepEqual(fs.readFileSync(fixture.store.chapterPath(fixture.project.id, chapter.id)), chapterBytes[index]);
             }
             assert.equal(fs.existsSync(fixture.store.schemaMigrationJournalPath(fixture.project.id)), false);
+        }
+    });
+
+    test('rejects a migration backup root whose existing ancestor is linked at construction', () => {
+        const linkedParent = path.join(rootDirectory, 'initial-linked-backup-parent');
+        const externalParent = path.join(rootDirectory, 'initial-linked-backup-target');
+        const externalMarker = path.join(externalParent, 'marker.txt');
+        fs.mkdirSync(externalParent);
+        fs.writeFileSync(externalMarker, 'unchanged', 'utf8');
+        fs.symlinkSync(
+            externalParent,
+            linkedParent,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+
+        assert.throws(
+            () => new StoryStudioStore(path.join(rootDirectory, 'initial-linked-backup-store'), {
+                migrationBackupsDirectory: path.join(linkedParent, 'nested', 'backups'),
+            }),
+            hasCode('invalid_storage'),
+        );
+        assert.deepEqual(fs.readdirSync(externalParent), ['marker.txt']);
+        assert.equal(fs.readFileSync(externalMarker, 'utf8'), 'unchanged');
+    });
+
+    test('rejects migration backup writes after an ancestor is replaced by a junction', () => {
+        const backupParent = path.join(rootDirectory, 'replaceable-backup-parent');
+        const backupRoot = path.join(backupParent, 'backups');
+        const originalParent = path.join(rootDirectory, 'replaceable-backup-parent-original');
+        const externalParent = path.join(rootDirectory, 'replacement-backup-parent');
+        const externalBackupRoot = path.join(externalParent, 'backups');
+        const fixture = createV4Project('v4-replaced-backup-ancestor', backupRoot);
+        const projectBytes = fs.readFileSync(fixture.store.projectPath(fixture.project.id));
+        const chapterBytes = fixture.chapters.map(chapter => fs.readFileSync(
+            fixture.store.chapterPath(fixture.project.id, chapter.id),
+        ));
+        fs.renameSync(backupParent, originalParent);
+        fs.mkdirSync(externalBackupRoot, { recursive: true });
+        fs.symlinkSync(
+            externalParent,
+            backupParent,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        try {
+            assert.throws(() => fixture.store.getProject(fixture.project.id), hasCode('invalid_storage'));
+            assert.deepEqual(fs.readdirSync(externalBackupRoot), []);
+            assert.deepEqual(fs.readFileSync(fixture.store.projectPath(fixture.project.id)), projectBytes);
+            for (const [index, chapter] of fixture.chapters.entries()) {
+                assert.deepEqual(
+                    fs.readFileSync(fixture.store.chapterPath(fixture.project.id, chapter.id)),
+                    chapterBytes[index],
+                );
+            }
+            assert.equal(fs.existsSync(fixture.store.schemaMigrationJournalPath(fixture.project.id)), false);
+        } finally {
+            fs.unlinkSync(backupParent);
+            fs.renameSync(originalParent, backupParent);
         }
     });
 
@@ -583,7 +650,7 @@ describe('Schema V5 legacy migration', () => {
             assert.deepEqual(listFiles(fixture.store.projectDirectory(fixture.project.id)), sourceFiles);
             assert.equal(readJson(fixture.store.projectPath(fixture.project.id)).schemaVersion, 4);
             assert.equal(fs.existsSync(fixture.store.schemaMigrationJournalPath(fixture.project.id)), false);
-            assert.equal(fs.existsSync(fixture.backupRoot), false);
+            assert.deepEqual(fs.readdirSync(fixture.backupRoot), []);
         }
     });
 });

@@ -544,6 +544,10 @@ export class WorkflowService {
         return { project, chapter };
     }
 
+    loadAuthorityReadOnly(projectId, chapterId) {
+        return this.storyStore.getProjectAndChapterReadOnly(projectId, chapterId);
+    }
+
     assertAuthority(project, chapter, expectedProjectVersion, expectedChapterRevision, code = 'workflow_authority_changed') {
         if (project.version !== expectedProjectVersion || chapter.revision !== expectedChapterRevision) {
             throw new ApiError(409, code, 'The authoritative project or chapter changed.', {
@@ -1277,7 +1281,7 @@ export class WorkflowService {
     }
 
     listRuns(projectId, chapterId) {
-        this.loadAuthority(projectId, chapterId);
+        this.loadAuthorityReadOnly(projectId, chapterId);
         return {
             runs: this.workflowStore.listRuns(projectId)
                 .filter(run => run.chapterId === chapterId)
@@ -1312,13 +1316,15 @@ export class WorkflowService {
         )) ?? null;
     }
 
-    runView(projectId, chapterId, runId, extra = {}) {
+    runView(projectId, chapterId, runId, extra = {}, { readOnlyAuthority = false } = {}) {
         const run = this.workflowStore.getRun(projectId, runId);
         if (run.chapterId !== chapterId) throw new ApiError(404, 'workflow_run_not_found', 'Workflow run not found.');
         const definition = this.workflowStore.getDefinition(run.definitionId);
         const storedArtifacts = this.workflowStore.listArtifacts(projectId, runId);
         const artifacts = storedArtifacts.map(publicArtifact);
-        const { project, chapter } = this.loadAuthority(projectId, chapterId);
+        const { project, chapter } = readOnlyAuthority
+            ? this.loadAuthorityReadOnly(projectId, chapterId)
+            : this.loadAuthority(projectId, chapterId);
         const activeOperation = this.runOperations.get(this.runOperationKey(projectId, chapterId, runId));
         const operation = activeOperation ? {
             status: run.status === 'cancelled' ? 'draining' : 'executing',
@@ -1342,7 +1348,7 @@ export class WorkflowService {
         if (run.chapterId !== chapterId) {
             throw new ApiError(404, 'workflow_run_not_found', 'Workflow run not found.');
         }
-        return this.runView(projectId, chapterId, runId);
+        return this.runView(projectId, chapterId, runId, {}, { readOnlyAuthority: true });
     }
 
     existingReceipt(projectId, runId, commandId, expectedRevision, type, payload) {

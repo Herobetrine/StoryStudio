@@ -54,6 +54,10 @@ export function createCopilotRouter(service) {
         response.send(service.listSessions(request.params.projectId));
     });
 
+    router.post('/story-studio/projects/:projectId/copilot/sessions/reconcile', (request, response) => {
+        response.send(service.reconcileSessions(request.params.projectId, request.body));
+    });
+
     router.post('/story-studio/projects/:projectId/copilot/sessions', (request, response) => {
         response.status(201).send(service.createSession(request.params.projectId, request.body));
     });

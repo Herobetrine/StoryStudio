@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
-import { ApiError } from './api-error.js';
+import { ApiError, createStoragePathGuard } from './api-error.js';
 import {
     BUILTIN_WORKFLOW_DEFINITIONS,
     WORKFLOW_ARTIFACT_KINDS,
@@ -586,12 +586,13 @@ export class WorkflowStore {
         if (typeof rootDirectory !== 'string' || rootDirectory.length === 0) {
             throw new TypeError('WorkflowStore requires a root directory.');
         }
-        this.rootDirectory = path.resolve(rootDirectory);
-        fs.mkdirSync(this.rootDirectory, { recursive: true });
-        const rootStat = fs.lstatSync(this.rootDirectory);
-        if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-            storageFailure('Workflow storage root must be a real directory.', 'unsafe_workflow_path');
-        }
+        this.pathGuard = createStoragePathGuard(rootDirectory, {
+            label: 'Workflow storage',
+            createError: (message, details) => (
+                new ApiError(500, 'unsafe_workflow_path', message, details)
+            ),
+        });
+        this.rootDirectory = this.pathGuard.rootDirectory;
         this.definitionsDirectory = this.safePath('definitions');
         this.projectsDirectory = this.safePath('projects');
         this.receiptsDirectory = this.safePath('receipts');
@@ -602,35 +603,15 @@ export class WorkflowStore {
     }
 
     safePath(...segments) {
-        const result = path.resolve(this.rootDirectory, ...segments);
-        if (result !== this.rootDirectory && !result.startsWith(`${this.rootDirectory}${path.sep}`)) {
-            storageFailure('Workflow storage path escaped its root.', 'unsafe_workflow_path');
-        }
-        this.assertNoLinks(result);
-        return result;
+        return this.pathGuard.resolvePath(...segments);
     }
 
     assertNoLinks(target) {
-        const relative = path.relative(this.rootDirectory, target);
-        let current = this.rootDirectory;
-        if (!relative) return;
-        for (const segment of relative.split(path.sep)) {
-            current = path.join(current, segment);
-            if (!fs.existsSync(current)) continue;
-            const stat = fs.lstatSync(current);
-            if (stat.isSymbolicLink()) {
-                storageFailure('Workflow storage cannot traverse symbolic links or junctions.', 'unsafe_workflow_path');
-            }
-        }
+        return this.pathGuard.assertPath(target);
     }
 
     ensureDirectory(directory) {
-        this.assertNoLinks(directory);
-        fs.mkdirSync(directory, { recursive: true });
-        this.assertNoLinks(directory);
-        if (!fs.lstatSync(directory).isDirectory()) {
-            storageFailure('Workflow storage path is not a directory.', 'unsafe_workflow_path');
-        }
+        return this.pathGuard.ensureDirectory(directory);
     }
 
     writeJson(filePath, value) {
@@ -645,7 +626,9 @@ export class WorkflowStore {
         if (Buffer.byteLength(json, 'utf8') > MAX_RECORD_BYTES) {
             bad('Workflow record exceeds the storage limit.', 'workflow_payload_too_large');
         }
+        this.assertNoLinks(filePath);
         writeFileAtomicSync(filePath, json, { encoding: 'utf8', mode: 0o600 });
+        this.assertNoLinks(filePath);
         try {
             fs.chmodSync(filePath, 0o600);
         } catch (error) {

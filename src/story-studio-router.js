@@ -298,6 +298,13 @@ export function createStoryStudioRouter(store, chapterVersionStore = null, retri
         ));
     });
 
+    router.get('/projects/:projectId/chapters/:chapterId/authority', (request, response) => {
+        response.send(store.getProjectAndChapterReadOnly(
+            request.params.projectId,
+            request.params.chapterId,
+        ));
+    });
+
     router.get('/projects/:projectId/chapters/:chapterId', (request, response) => {
         response.send(store.getChapter(request.params.projectId, request.params.chapterId));
     });

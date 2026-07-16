@@ -111,7 +111,10 @@ describe('first-class planning Copilot UI contract', () => {
         assert.match(app, /instruction:\s*state\.copilotInstruction/);
 
         assert.match(app, /async function generateCopilotSession\(/);
-        assert.match(app, /streamMutation\(copilotPath\(projectId, `\/sessions\/\$\{encodeURIComponent\(session\.id\)\}\/generate`\)/);
+        assert.match(
+            app,
+            /streamMutation\(\s*copilotPath\(projectId, `\/sessions\/\$\{encodeURIComponent\(session\.id\)\}\/generate`\)/,
+        );
         assert.match(app, /Accept:\s*'application\/x-ndjson'/);
         assert.match(app, /response\.body\.getReader\(\)/);
         assert.match(app, /JSON\.parse\(line\)/);
@@ -119,6 +122,11 @@ describe('first-class planning Copilot UI contract', () => {
         assert.match(app, /event\?\.type === 'delta'/);
         assert.match(app, /event\?\.type === 'done'/);
         assert.match(app, /event\?\.type === 'error'/);
+        assert.match(app, /const completed = await streamMutation\(/);
+        assert.match(
+            app,
+            /if \(!completed\) \{\s*throw new ApiError\('策划生成数据流提前结束', 502, \{ error: 'copilot_stream_ended' \}\);\s*\}/,
+        );
 
         assert.match(app, /async function cancelCopilotGeneration\(/);
         assert.match(app, /\/cancel`/);
@@ -132,6 +140,58 @@ describe('first-class planning Copilot UI contract', () => {
         const localAbort = cancelSource.indexOf('generationController.abort(');
         assert.ok(cancelMutation >= 0 && localAbort > cancelMutation,
             'The local generation stream must abort only after the cancel API succeeds.');
+    });
+
+    test('ignores buffered generation events after the active project, session, or controller changes', () => {
+        const identitySource = app.slice(
+            app.indexOf('function copilotGenerationIsCurrent('),
+            app.indexOf('function resetCopilotWorkspace('),
+        );
+        assert.match(identitySource, /function copilotGenerationIsCurrent\(projectId, sessionId, controller\)/);
+        assert.match(identitySource, /state\.project\?\.id === projectId/);
+        assert.match(identitySource, /state\.copilotProjectId === projectId/);
+        assert.match(identitySource, /state\.copilotSessionId === sessionId/);
+        assert.match(identitySource, /state\.copilotGenerationController === controller/);
+
+        const generationSource = app.slice(
+            app.indexOf('async function generateCopilotSession('),
+            app.indexOf('async function cancelCopilotGeneration('),
+        );
+        assert.match(generationSource, /const sessionId = session\.id/);
+        assert.match(
+            generationSource,
+            /onEvent:\s*event\s*=>\s*\{\s*if \(!copilotGenerationIsCurrent\(projectId, sessionId, controller\)\) return;/,
+        );
+        assert.match(
+            generationSource,
+            /\);\s*if \(!copilotGenerationIsCurrent\(projectId, sessionId, controller\)\) return;\s*if \(!completed\) \{[\s\S]*copilot_stream_ended[\s\S]*\}\s*state\.copilotStream = '';\s*showToast\('策划候选已生成'\);/,
+        );
+        assert.match(
+            generationSource,
+            /\}\s*catch \(error\) \{\s*if \(!copilotGenerationIsCurrent\(projectId, sessionId, controller\)\) return;/,
+        );
+        assert.match(
+            generationSource,
+            /\}\s*finally\s*\{\s*if \(copilotGenerationIsCurrent\(projectId, sessionId, controller\)\) \{[\s\S]*state\.copilotGenerationController = null;[\s\S]*state\.copilotGenerating = false;[\s\S]*state\.copilotCancelling = false;[\s\S]*\}\s*\}/,
+        );
+    });
+
+    test('reconciles interrupted sessions through an explicit CSRF-protected write before read-only GETs', () => {
+        const loadSessions = app.slice(
+            app.indexOf('async function loadCopilotSessions('),
+            app.indexOf('async function loadCopilotWorkspace('),
+        );
+        const loadWorkspace = app.slice(
+            app.indexOf('async function loadCopilotWorkspace('),
+            app.indexOf('async function previewCopilotContext('),
+        );
+        for (const source of [loadSessions, loadWorkspace]) {
+            assert.match(
+                source,
+                /apiMutation\(copilotPath\(projectId, '\/sessions\/reconcile'\),\s*\{[\s\S]*method:\s*'POST'[\s\S]*body:\s*\{\}/,
+            );
+            assert.doesNotMatch(source, /apiRequest\(copilotPath\(projectId, '\/sessions'\)\)/);
+        }
     });
 
     test('hands one selected direction into a version-bound Workflow V2 run', () => {

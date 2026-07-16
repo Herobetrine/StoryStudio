@@ -66,6 +66,17 @@ function v2Card(name = '沈砚') {
     };
 }
 
+function assertCredentialValuesRemoved(value, credentials) {
+    const serialized = JSON.stringify(value);
+    for (const credential of credentials) {
+        assert.equal(
+            serialized.includes(credential),
+            false,
+            `serialized resource still contains credential fixture ${credential}`,
+        );
+    }
+}
+
 const CRC_TABLE = (() => {
     const table = new Uint32Array(256);
     for (let index = 0; index < 256; index++) {
@@ -303,6 +314,327 @@ describe('compatibility resource parsing and persistence', () => {
         assert.equal(storedText.includes('attacker.invalid'), false);
         assert.equal(storedText.includes('secret-key'), false);
         assert.equal(result.resource.source.removedSensitiveFields.length, 3);
+    });
+
+    test('recursively removes credential-shaped preset fields without stripping token limits', () => {
+        const { project } = store.createProject({ title: '递归清理预设' });
+        const credentials = [
+            'ACCESS_TOKEN_FIXTURE',
+            'CLIENT_SECRET_FIXTURE',
+            'PASSWORD_FIXTURE',
+            'COOKIE_FIXTURE',
+            'BEARER_TOKEN_FIXTURE',
+            'CUSTOM_AUTH_TOKEN_FIXTURE',
+            'AUTHORIZATION_TOKEN_FIXTURE',
+        ];
+        const result = store.importResource(project.id, project.version, {
+            fileName: 'nested-credentials.json',
+            mediaType: 'application/json',
+            encoding: 'json',
+            data: {
+                name: 'Nested credential preset',
+                temperature: 0.7,
+                maxTokens: 4_096,
+                runtime: {
+                    access_token: credentials[0],
+                    client_secret: credentials[1],
+                    password: credentials[2],
+                    cookie: credentials[3],
+                    bearer_token: credentials[4],
+                    customAuthToken: credentials[5],
+                    authorization_token: credentials[6],
+                    tokenBudget: 1_200,
+                    maxTokens: 8_192,
+                },
+            },
+        });
+
+        assertCredentialValuesRemoved(result.resource, credentials);
+        assert.equal(result.resource.generation.maxTokens, 4_096);
+        assert.equal(result.resource.source.raw.runtime.tokenBudget, 1_200);
+        assert.equal(result.resource.source.raw.runtime.maxTokens, 8_192);
+        for (const field of [
+            'runtime.access_token',
+            'runtime.client_secret',
+            'runtime.password',
+            'runtime.cookie',
+            'runtime.bearer_token',
+            'runtime.customAuthToken',
+            'runtime.authorization_token',
+        ]) {
+            assert.equal(result.resource.source.removedSensitiveFields.includes(field), true, field);
+        }
+    });
+
+    test('removes provider, session, header, and Unicode-obfuscated credential keys', () => {
+        const { project } = store.createProject({ title: '扩展凭据键清理' });
+        const credentialFields = [
+            ['api_key_openai', 'OPENAI_PREFIXED_API_KEY_FIXTURE'],
+            ['apiKeyAnthropic', 'ANTHROPIC_SUFFIXED_API_KEY_FIXTURE'],
+            ['aws_access_key_id', 'AWS_ACCESS_KEY_ID_FIXTURE'],
+            ['oauth2_token', 'OAUTH2_TOKEN_FIXTURE'],
+            ['jwt_token', 'JWT_TOKEN_FIXTURE'],
+            ['csrf_token', 'CSRF_TOKEN_FIXTURE'],
+            ['xsrf_token', 'XSRF_TOKEN_FIXTURE'],
+            ['auth', 'BARE_AUTH_FIXTURE'],
+            ['authentication', 'BARE_AUTHENTICATION_FIXTURE'],
+            ['bearer', 'BARE_BEARER_FIXTURE'],
+            ['authorizationHeader', 'AUTHORIZATION_HEADER_FIXTURE'],
+            ['apiKeyHeader', 'API_KEY_HEADER_FIXTURE'],
+            ['a\u0301pi_key', 'COMBINING_MARK_API_KEY_FIXTURE'],
+            ['github_token', 'KNOWN_PROVIDER_TOKEN_FIXTURE'],
+            ['session_cookie', 'SESSION_COOKIE_FIXTURE'],
+            ['headers', 'RAW_AUTHORIZATION_HEADERS_FIXTURE'],
+            ['user_password', 'PREFIXED_PASSWORD_FIXTURE'],
+            ['encryptionPassphrase', 'ENCRYPTION_PASSPHRASE_FIXTURE'],
+            ['access_token_value', 'ACCESS_TOKEN_VALUE_FIXTURE'],
+            ['refreshTokenValue', 'REFRESH_TOKEN_VALUE_FIXTURE'],
+            ['auth_token_value', 'AUTH_TOKEN_VALUE_FIXTURE'],
+            ['bearerTokenValue', 'BEARER_TOKEN_VALUE_FIXTURE'],
+            ['session_token_value', 'SESSION_TOKEN_VALUE_FIXTURE'],
+            ['oauth2_token_value', 'OAUTH2_TOKEN_VALUE_FIXTURE'],
+            ['id_token_value', 'ID_TOKEN_VALUE_FIXTURE'],
+            ['github_token_value', 'KNOWN_PROVIDER_TOKEN_VALUE_FIXTURE'],
+            ['client_secret_value', 'CLIENT_SECRET_VALUE_FIXTURE'],
+            ['customAuthTokenValue', 'CUSTOM_AUTH_TOKEN_VALUE_FIXTURE'],
+            ['user_password_value', 'PASSWORD_VALUE_FIXTURE'],
+            ['api_key_value', 'API_KEY_VALUE_FIXTURE'],
+            ['service_account_private_key_value', 'SERVICE_ACCOUNT_PRIVATE_KEY_VALUE_FIXTURE'],
+            ['google_private_key', 'GOOGLE_PRIVATE_KEY_FIXTURE'],
+            ['encryption_key_value', 'ENCRYPTION_KEY_VALUE_FIXTURE'],
+            ['vendor_signing_key', 'VENDOR_SIGNING_KEY_FIXTURE'],
+            ['custom_headers', 'CUSTOM_HEADERS_FIXTURE'],
+            ['request_headers', 'REQUEST_HEADERS_FIXTURE'],
+            ['http_header_value', 'HTTP_HEADER_VALUE_FIXTURE'],
+            ['extra_headers_value', 'EXTRA_HEADERS_VALUE_FIXTURE'],
+            ['raw_headers', 'RAW_HEADERS_FIXTURE'],
+            ['stripe_webhook_secret', 'STRIPE_WEBHOOK_SECRET_FIXTURE'],
+            ['service_credentials', 'SERVICE_CREDENTIALS_FIXTURE'],
+            ['google_credential_value', 'GOOGLE_CREDENTIAL_VALUE_FIXTURE'],
+            ['client_credential', 'CLIENT_CREDENTIAL_FIXTURE'],
+        ];
+        const card = v2Card('扩展凭据角色');
+        card.data.extensions = {
+            nested: {
+                token: 'ordinary-creative-token',
+                secret: 'ordinary-creative-secret',
+                url: 'story://character-reference',
+                endpoint: '终章边界',
+                tokenBudget: 1_024,
+                maxTokens: 2_048,
+                token_value: 'ordinary-creative-token-value',
+                secret_value: 'ordinary-creative-secret-value',
+                endpoint_value: '终章边界值',
+                ordinary_key: 'ordinary-creative-key',
+                ...Object.fromEntries(credentialFields),
+            },
+        };
+
+        const imported = store.importResource(project.id, project.version, {
+            fileName: 'extended-credential-keys.json',
+            mediaType: 'application/json',
+            encoding: 'json',
+            data: card,
+        });
+
+        assertCredentialValuesRemoved(imported.resource, credentialFields.map(([, value]) => value));
+        assert.deepEqual(imported.resource.extensions.nested, {
+            token: 'ordinary-creative-token',
+            secret: 'ordinary-creative-secret',
+            url: 'story://character-reference',
+            endpoint: '终章边界',
+            tokenBudget: 1_024,
+            maxTokens: 2_048,
+            token_value: 'ordinary-creative-token-value',
+            secret_value: 'ordinary-creative-secret-value',
+            endpoint_value: '终章边界值',
+            ordinary_key: 'ordinary-creative-key',
+        });
+        assert.deepEqual(imported.resource.source.raw.data.extensions.nested, {
+            token: 'ordinary-creative-token',
+            secret: 'ordinary-creative-secret',
+            url: 'story://character-reference',
+            endpoint: '终章边界',
+            tokenBudget: 1_024,
+            maxTokens: 2_048,
+            token_value: 'ordinary-creative-token-value',
+            secret_value: 'ordinary-creative-secret-value',
+            endpoint_value: '终章边界值',
+            ordinary_key: 'ordinary-creative-key',
+        });
+        for (const [field] of credentialFields) {
+            assert.equal(
+                imported.resource.source.removedSensitiveFields.includes(
+                    `data.extensions.nested.${field}`,
+                ),
+                true,
+                field,
+            );
+        }
+    });
+
+    test('records embedded Character Book credential removals on both split resources', () => {
+        const { project } = store.createProject({ title: '嵌入世界书凭据清理' });
+        const card = v2Card('嵌入清理角色');
+        card.data.character_book.extensions = {
+            access_token_value: 'EMBEDDED_BOOK_ACCESS_TOKEN_VALUE_FIXTURE',
+            token: 'ordinary-embedded-token',
+        };
+        card.data.character_book.entries[0].extensions = {
+            password: 'EMBEDDED_BOOK_PASSWORD_FIXTURE',
+            tokenBudget: 128,
+        };
+
+        const imported = store.importResource(project.id, project.version, {
+            fileName: 'embedded-book-credentials.json',
+            mediaType: 'application/json',
+            encoding: 'json',
+            data: card,
+        });
+        const lorebook = store.getResource(
+            project.id,
+            'lorebook',
+            imported.resource.embeddedLorebookId,
+        );
+
+        assertCredentialValuesRemoved(
+            { character: imported.resource, lorebook },
+            [
+                'EMBEDDED_BOOK_ACCESS_TOKEN_VALUE_FIXTURE',
+                'EMBEDDED_BOOK_PASSWORD_FIXTURE',
+            ],
+        );
+        assert.equal(lorebook.extensions.token, 'ordinary-embedded-token');
+        assert.equal(lorebook.entries[0].extensions.tokenBudget, 128);
+        assert.equal(
+            imported.resource.source.removedSensitiveFields.includes(
+                'data.character_book.extensions.access_token_value',
+            ),
+            true,
+        );
+        assert.equal(
+            imported.resource.source.removedSensitiveFields.includes(
+                'data.character_book.entries[0].extensions.password',
+            ),
+            true,
+        );
+        assert.equal(
+            lorebook.source.removedSensitiveFields.includes(
+                'extensions.access_token_value',
+            ),
+            true,
+        );
+        assert.equal(
+            lorebook.source.removedSensitiveFields.includes(
+                'entries[0].extensions.password',
+            ),
+            true,
+        );
+    });
+
+    test('sanitizes V2 and V3 character extensions and their retained raw source', async t => {
+        for (const [label, spec, specVersion] of [
+            ['V2', 'chara_card_v2', '2.0'],
+            ['V3', 'chara_card_v3', '3.1'],
+        ]) {
+            await t.test(label, () => {
+                const caseStore = new StoryStudioStore(path.join(root, label));
+                const { project } = caseStore.createProject({ title: `${label} 角色清理` });
+                const card = v2Card(`${label} 角色`);
+                card.spec = spec;
+                card.spec_version = specVersion;
+                const credentials = [
+                    `${label}_ACCESS_TOKEN_FIXTURE`,
+                    `${label}_CLIENT_SECRET_FIXTURE`,
+                    `${label}_AUTHORIZATION_TOKEN_FIXTURE`,
+                ];
+                card.data.extensions = {
+                    ...card.data.extensions,
+                    access_token: credentials[0],
+                    nested: {
+                        client_secret: credentials[1],
+                        authorizationToken: credentials[2],
+                        token: 'narrative-token',
+                        secret: '角色仍未公开的秘密',
+                        url: 'story://character-portrait',
+                        endpoint: '终章边界',
+                        tokenBudget: 320,
+                        maxTokens: 640,
+                    },
+                };
+
+                const imported = caseStore.importResource(project.id, project.version, {
+                    fileName: `${label.toLowerCase()}-credentials.json`,
+                    mediaType: 'application/json',
+                    encoding: 'json',
+                    data: card,
+                });
+
+                assertCredentialValuesRemoved(imported.resource, credentials);
+                assert.equal(imported.resource.extensions.nested.tokenBudget, 320);
+                assert.equal(imported.resource.extensions.nested.maxTokens, 640);
+                assert.equal(imported.resource.extensions.nested.token, 'narrative-token');
+                assert.equal(imported.resource.extensions.nested.secret, '角色仍未公开的秘密');
+                assert.equal(imported.resource.extensions.nested.url, 'story://character-portrait');
+                assert.equal(imported.resource.extensions.nested.endpoint, '终章边界');
+                assert.equal(imported.resource.source.raw.data.extensions.nested.tokenBudget, 320);
+                assert.equal(imported.resource.source.raw.data.extensions.nested.maxTokens, 640);
+                assert.equal(imported.resource.source.raw.data.extensions.nested.token, 'narrative-token');
+                assert.equal(imported.resource.source.raw.data.extensions.nested.url, 'story://character-portrait');
+                assert.equal(imported.resource.source.raw.data.extensions.nested.endpoint, '终章边界');
+            });
+        }
+    });
+
+    test('sanitizes lorebook root and entry extensions while preserving token metadata', () => {
+        const { project } = store.createProject({ title: '世界书清理' });
+        const credentials = ['LORE_COOKIE_FIXTURE', 'LORE_PASSWORD_FIXTURE', 'LORE_AUTH_TOKEN_FIXTURE'];
+        const imported = store.importResource(project.id, project.version, {
+            fileName: 'lore-credentials.json',
+            mediaType: 'application/json',
+            encoding: 'json',
+            data: {
+                name: '清理世界书',
+                token_budget: 2_000,
+                extensions: {
+                    cookie: credentials[0],
+                    token: 'lore-token',
+                    secret: '世界书中的普通秘密字段',
+                    url: 'story://lore-reference',
+                    endpoint: '设定边界',
+                    tokenBudget: 300,
+                    maxTokens: 600,
+                },
+                entries: [{
+                    id: 1,
+                    keys: ['封印'],
+                    content: '封印仍在。',
+                    enabled: true,
+                    extensions: {
+                        password: credentials[1],
+                        customAuthToken: credentials[2],
+                        tokenBudget: 120,
+                        maxTokens: 240,
+                    },
+                }],
+            },
+        });
+
+        assertCredentialValuesRemoved(imported.resource, credentials);
+        assert.equal(imported.resource.tokenBudget, 2_000);
+        assert.equal(imported.resource.extensions.tokenBudget, 300);
+        assert.equal(imported.resource.extensions.maxTokens, 600);
+        assert.equal(imported.resource.extensions.token, 'lore-token');
+        assert.equal(imported.resource.extensions.secret, '世界书中的普通秘密字段');
+        assert.equal(imported.resource.extensions.url, 'story://lore-reference');
+        assert.equal(imported.resource.extensions.endpoint, '设定边界');
+        assert.equal(imported.resource.entries[0].extensions.tokenBudget, 120);
+        assert.equal(imported.resource.entries[0].extensions.maxTokens, 240);
+        assert.equal(imported.resource.source.raw.extensions.tokenBudget, 300);
+        assert.equal(imported.resource.source.raw.extensions.token, 'lore-token');
+        assert.equal(imported.resource.source.raw.extensions.url, 'story://lore-reference');
+        assert.equal(imported.resource.source.raw.extensions.endpoint, '设定边界');
+        assert.equal(imported.resource.source.raw.entries[0].extensions.maxTokens, 240);
     });
 
     test('converts the official Default prompt shape into stable Profile V2 modules and selected order', () => {
@@ -676,6 +1008,103 @@ describe('compatibility resource parsing and persistence', () => {
         assert.equal(restoredCharacter.persona, true);
         assert.equal(restored.project.version, 1);
         assert.equal(activated.version, 3);
+    });
+
+    test('sanitizes StoryStudio resource imports and legacy disk records before read or export', async () => {
+        const { project } = store.createProject({ title: '内部资源清理' });
+        const characterImport = store.importResource(project.id, project.version, {
+            fileName: 'character.json', mediaType: 'application/json', encoding: 'json', data: v2Card('内部角色'),
+        });
+        const profileImport = store.importResource(project.id, characterImport.project.version, {
+            fileName: 'profile.json',
+            mediaType: 'application/json',
+            encoding: 'json',
+            data: {
+                profileVersion: 2,
+                name: 'Internal profile',
+                generation: { maxTokens: 2_048 },
+                tokenBudget: 900,
+                modules: [{
+                    id: 'main',
+                    name: 'Main',
+                    slot: 'main',
+                    role: 'system',
+                    template: 'Write.',
+                    sourceRef: { format: 'test' },
+                }],
+                order: ['main'],
+            },
+        });
+        const exported = await store.exportProject(project.id);
+        const importedCredentials = [
+            'INTERNAL_CHARACTER_AUTH_FIXTURE',
+            'INTERNAL_CHARACTER_RAW_FIXTURE',
+            'INTERNAL_LORE_COOKIE_FIXTURE',
+            'INTERNAL_LORE_ENTRY_FIXTURE',
+            'INTERNAL_PROFILE_SECRET_FIXTURE',
+            'INTERNAL_PROFILE_MODULE_FIXTURE',
+        ];
+        exported.resources.characters[0].extensions.customAuthToken = importedCredentials[0];
+        exported.resources.characters[0].source.raw = {
+            access_token: importedCredentials[1],
+            tokenBudget: 111,
+            maxTokens: 222,
+        };
+        exported.resources.lorebooks[0].extensions.cookie = importedCredentials[2];
+        exported.resources.lorebooks[0].entries[0].extensions.password = importedCredentials[3];
+        exported.resources.promptProfiles[0].source.raw = {
+            client_secret: importedCredentials[4],
+            tokenBudget: 333,
+            maxTokens: 444,
+        };
+        exported.resources.promptProfiles[0].modules[0].sourceRef.customAuthToken = importedCredentials[5];
+
+        const restored = await store.importProject(exported);
+        const restoredCharacter = store.getResource(
+            restored.project.id,
+            'character',
+            restored.project.resources.characterIds[0],
+        );
+        const restoredLorebook = store.getResource(
+            restored.project.id,
+            'lorebook',
+            restored.project.resources.lorebookIds[0],
+        );
+        const restoredProfile = store.getResource(
+            restored.project.id,
+            'prompt-profile',
+            restored.project.resources.promptProfileIds[0],
+        );
+        assertCredentialValuesRemoved(
+            { restoredCharacter, restoredLorebook, restoredProfile },
+            importedCredentials,
+        );
+        assert.equal(restoredCharacter.source.raw.tokenBudget, 111);
+        assert.equal(restoredCharacter.source.raw.maxTokens, 222);
+        assert.equal(restoredProfile.source.raw.tokenBudget, 333);
+        assert.equal(restoredProfile.source.raw.maxTokens, 444);
+        assert.equal(restoredProfile.generation.maxTokens, 2_048);
+        assert.equal(restoredProfile.tokenBudget, 900);
+
+        const diskCredential = 'LEGACY_DISK_ACCESS_TOKEN_FIXTURE';
+        const characterPath = store.resourcePath(
+            restored.project.id,
+            'character',
+            restored.project.resources.characterIds[0],
+        );
+        const storedCharacter = JSON.parse(fs.readFileSync(characterPath, 'utf8'));
+        storedCharacter.extensions.access_token = diskCredential;
+        storedCharacter.source.raw.bearer_token = diskCredential;
+        storedCharacter.extensions.tokenBudget = 515;
+        storedCharacter.extensions.maxTokens = 1_030;
+        fs.writeFileSync(characterPath, JSON.stringify(storedCharacter), 'utf8');
+
+        const readBack = store.getResource(restored.project.id, 'character', storedCharacter.id);
+        assertCredentialValuesRemoved(readBack, [diskCredential]);
+        assert.equal(readBack.extensions.tokenBudget, 515);
+        assert.equal(readBack.extensions.maxTokens, 1_030);
+        const reexported = await store.exportProject(restored.project.id);
+        assertCredentialValuesRemoved(reexported, [diskCredential]);
     });
 
     test('imports a legacy V1 export as an explicit V5 migration', async () => {
@@ -1052,6 +1481,110 @@ describe('resource HTTP API', () => {
                 .get(`/api/story-studio/projects/${created.body.project.id}/resources/characters/${imported.body.resource.id}`)
                 .set('Host', LOCAL_HOST)
                 .expect(200);
+        } finally {
+            fs.rmSync(dataRoot, { recursive: true, force: true });
+        }
+    });
+
+    test('sanitizes a legacy resource file before API read and project export', async () => {
+        const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-resource-api-redaction-'));
+        try {
+            const app = createApp({ dataRoot });
+            const bootstrap = await request(app).get('/api/bootstrap').set('Host', LOCAL_HOST).expect(200);
+            const created = await request(app)
+                .post('/api/story-studio/projects')
+                .set('Host', LOCAL_HOST)
+                .set('X-CSRF-Token', bootstrap.body.csrfToken)
+                .send({ title: 'API 旧资源清理' })
+                .expect(201);
+            const imported = await request(app)
+                .post(`/api/story-studio/projects/${created.body.project.id}/resources/import`)
+                .set('Host', LOCAL_HOST)
+                .set('X-CSRF-Token', bootstrap.body.csrfToken)
+                .send({
+                    projectVersion: created.body.project.version,
+                    import: {
+                        fileName: 'legacy-card.json',
+                        mediaType: 'application/json',
+                        encoding: 'json',
+                        data: v2Card('API 清理角色'),
+                    },
+                })
+                .expect(201);
+
+            const diskStore = new StoryStudioStore(path.join(dataRoot, 'story-studio'));
+            const resourcePath = diskStore.resourcePath(
+                created.body.project.id,
+                'character',
+                imported.body.resource.id,
+            );
+            const stored = JSON.parse(fs.readFileSync(resourcePath, 'utf8'));
+            const credentials = [
+                'API_LEGACY_CLIENT_SECRET_FIXTURE',
+                'API_LEGACY_AUTHORIZATION_TOKEN_FIXTURE',
+                'API_LEGACY_PREFIXED_API_KEY_FIXTURE',
+                'API_LEGACY_UNICODE_API_KEY_FIXTURE',
+                'API_LEGACY_PROVIDER_TOKEN_FIXTURE',
+                'API_LEGACY_SESSION_COOKIE_FIXTURE',
+                'API_LEGACY_AUTHORIZATION_HEADER_FIXTURE',
+                'API_LEGACY_RAW_HEADERS_FIXTURE',
+                'API_LEGACY_PREFIXED_PASSWORD_FIXTURE',
+                'API_LEGACY_PASSPHRASE_FIXTURE',
+                'API_LEGACY_CUSTOM_HEADERS_FIXTURE',
+                'API_LEGACY_REQUEST_HEADER_VALUE_FIXTURE',
+                'API_LEGACY_PRIVATE_KEY_FIXTURE',
+                'API_LEGACY_WEBHOOK_SECRET_FIXTURE',
+                'API_LEGACY_CREDENTIALS_FIXTURE',
+                'API_LEGACY_CREDENTIAL_VALUE_FIXTURE',
+                'API_LEGACY_RAW_PREFIXED_HEADERS_FIXTURE',
+            ];
+            stored.extensions.client_secret = credentials[0];
+            stored.source.raw.access_token = credentials[0];
+            stored.extensions.authorization_token = credentials[1];
+            stored.source.raw.authorizationToken = credentials[1];
+            stored.extensions.api_key_openai = credentials[2];
+            stored.source.raw['a\u0301pi_key'] = credentials[3];
+            stored.extensions.github_token = credentials[4];
+            stored.source.raw.session_cookie = credentials[5];
+            stored.extensions.authorizationHeader = credentials[6];
+            stored.extensions.headers = credentials[7];
+            stored.source.raw.user_password = credentials[8];
+            stored.extensions.encryptionPassphrase = credentials[9];
+            stored.extensions.custom_headers = credentials[10];
+            stored.source.raw.request_header_value = credentials[11];
+            stored.extensions.service_account_private_key_value = credentials[12];
+            stored.source.raw.stripe_webhook_secret = credentials[13];
+            stored.extensions.service_credentials = credentials[14];
+            stored.source.raw.google_credential_value = credentials[15];
+            stored.extensions.raw_headers = credentials[16];
+            stored.extensions.token = 'ordinary-token-metadata';
+            stored.extensions.secret = 'ordinary-secret-metadata';
+            stored.extensions.url = 'story://ordinary-reference';
+            stored.extensions.endpoint = '终章边界';
+            stored.extensions.tokenBudget = 1_024;
+            stored.extensions.maxTokens = 2_048;
+            fs.writeFileSync(resourcePath, JSON.stringify(stored), 'utf8');
+
+            const response = await request(app)
+                .get(`/api/story-studio/projects/${created.body.project.id}/resources/characters/${imported.body.resource.id}`)
+                .set('Host', LOCAL_HOST)
+                .expect(200);
+            assertCredentialValuesRemoved(response.body, credentials);
+            assert.equal(response.body.extensions.token, 'ordinary-token-metadata');
+            assert.equal(response.body.extensions.secret, 'ordinary-secret-metadata');
+            assert.equal(response.body.extensions.url, 'story://ordinary-reference');
+            assert.equal(response.body.extensions.endpoint, '终章边界');
+            assert.equal(response.body.extensions.tokenBudget, 1_024);
+            assert.equal(response.body.extensions.maxTokens, 2_048);
+
+            const exported = await diskStore.exportProject(created.body.project.id);
+            assertCredentialValuesRemoved(exported, credentials);
+            assert.equal(exported.resources.characters[0].extensions.token, 'ordinary-token-metadata');
+            assert.equal(exported.resources.characters[0].extensions.secret, 'ordinary-secret-metadata');
+            assert.equal(exported.resources.characters[0].extensions.url, 'story://ordinary-reference');
+            assert.equal(exported.resources.characters[0].extensions.endpoint, '终章边界');
+            assert.equal(exported.resources.characters[0].extensions.tokenBudget, 1_024);
+            assert.equal(exported.resources.characters[0].extensions.maxTokens, 2_048);
         } finally {
             fs.rmSync(dataRoot, { recursive: true, force: true });
         }

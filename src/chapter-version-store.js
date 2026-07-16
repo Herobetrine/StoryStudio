@@ -1,9 +1,10 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
+
+import { createStoragePathGuard } from './api-error.js';
 
 const CHAPTER_VERSION_SCHEMA_VERSION = 1;
 const VALID_ID = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -308,14 +309,22 @@ export class ChapterVersionStore {
         if (typeof rootDirectory !== 'string' || rootDirectory.length === 0) {
             throw storeError('Version store root is invalid.', 400, 'invalid_version_root');
         }
-        this.rootDirectory = path.resolve(rootDirectory);
+        this.pathGuard = createStoragePathGuard(rootDirectory, {
+            label: 'Chapter version storage',
+            createError: (message, details) => (
+                storeError(message, 500, 'unsafe_version_path', details)
+            ),
+        });
+        this.rootDirectory = this.pathGuard.rootDirectory;
         this.clock = options.clock ?? (() => new Date());
-        fs.mkdirSync(this.rootDirectory, { recursive: true });
+    }
+
+    storagePath(...segments) {
+        return this.pathGuard.resolvePath(...segments);
     }
 
     chapterDirectory(projectId, chapterId) {
-        return path.join(
-            this.rootDirectory,
+        return this.storagePath(
             assertId(projectId, 'projectId'),
             assertId(chapterId, 'chapterId'),
         );
@@ -323,7 +332,11 @@ export class ChapterVersionStore {
 
     versionPath(projectId, chapterId, chapterRevision) {
         const revision = cleanVersionNumber(chapterRevision, 'chapterRevision');
-        return path.join(this.chapterDirectory(projectId, chapterId), `r${String(revision).padStart(12, '0')}.json`);
+        return this.storagePath(
+            assertId(projectId, 'projectId'),
+            assertId(chapterId, 'chapterId'),
+            `r${String(revision).padStart(12, '0')}.json`,
+        );
     }
 
     readRevision(projectId, chapterId, chapterRevision) {
@@ -334,6 +347,7 @@ export class ChapterVersionStore {
         if (!fs.existsSync(filePath)) {
             throw storeError('Chapter version not found.', 404, 'chapter_version_not_found');
         }
+        this.pathGuard.assertPath(filePath);
         let value;
         try {
             value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -367,6 +381,7 @@ export class ChapterVersionStore {
         const normalizedChapterId = assertId(chapterId, 'chapterId');
         const directory = this.chapterDirectory(normalizedProjectId, normalizedChapterId);
         if (!fs.existsSync(directory)) return { versions: [], corrupt: [] };
+        this.pathGuard.assertPath(directory);
         const versions = [];
         const corrupt = [];
         for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
@@ -419,14 +434,22 @@ export class ChapterVersionStore {
         }
 
         const directory = this.chapterDirectory(input.projectId, input.chapterId);
-        fs.mkdirSync(directory, { recursive: true });
+        this.pathGuard.ensureDirectory(directory);
         const finalPath = this.versionPath(input.projectId, input.chapterId, input.chapterRevision);
         if (fs.existsSync(finalPath)) return this.resolveExisting(record);
 
-        const stagingPath = path.join(directory, `.version-${randomUUID()}.tmp`);
+        const stagingPath = this.storagePath(
+            input.projectId,
+            input.chapterId,
+            `.version-${randomUUID()}.tmp`,
+        );
+        const serialized = JSON.stringify(record, null, 2);
         try {
-            writeFileAtomicSync(stagingPath, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
+            this.pathGuard.assertPath(stagingPath);
+            writeFileAtomicSync(stagingPath, serialized, { encoding: 'utf8', mode: 0o600 });
             try {
+                this.pathGuard.assertPath(stagingPath);
+                this.pathGuard.assertPath(finalPath);
                 fs.linkSync(stagingPath, finalPath);
             } catch (error) {
                 if (error.code === 'EEXIST') return this.resolveExisting(record);
@@ -437,8 +460,12 @@ export class ChapterVersionStore {
             throw storeError('Could not append chapter version.', 500, 'version_write_failed');
         } finally {
             try {
+                this.pathGuard.assertPath(stagingPath);
                 fs.rmSync(stagingPath, { force: true });
-            } catch {
+            } catch (error) {
+                if (error instanceof ChapterVersionStoreError && error.code === 'unsafe_version_path') {
+                    throw error;
+                }
                 // The published version is already independent of its staging link.
             }
         }

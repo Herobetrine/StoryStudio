@@ -611,6 +611,16 @@ export class GenerationService {
         };
     }
 
+    listGenerations(projectId, chapterId) {
+        this.storyStore.assertChapterExistsReadOnly(projectId, chapterId);
+        return this.generationStore.listGenerations(projectId, chapterId);
+    }
+
+    getGeneration(projectId, chapterId, generationId) {
+        this.storyStore.assertChapterExistsReadOnly(projectId, chapterId);
+        return this.generationStore.getGeneration(projectId, chapterId, generationId);
+    }
+
     workflowGenerations(projectId, chapterId, intent) {
         return this.generationStore.listGenerations(projectId, chapterId)
             .map(item => this.generationStore.getGeneration(projectId, chapterId, item.id))

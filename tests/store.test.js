@@ -318,6 +318,91 @@ describe('StoryStudioStore compatibility contract', () => {
         assert.equal(store.getProject(project.id).title, '失锁保护测试');
     });
 
+    test('rejects linked project directories without touching the external target', () => {
+        const { project } = store.createProject({ title: '项目路径边界测试' });
+        const projectDirectory = store.projectDirectory(project.id);
+        const externalDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-external-project-'));
+        fs.cpSync(projectDirectory, externalDirectory, { recursive: true });
+        fs.rmSync(projectDirectory, { recursive: true, force: true });
+        fs.symlinkSync(
+            externalDirectory,
+            projectDirectory,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        const externalProjectPath = path.join(externalDirectory, 'project.json');
+        const before = fs.readFileSync(externalProjectPath, 'utf8');
+        try {
+            assert.throws(
+                () => store.updateProject(project.id, project.version, { title: '不应越界写入' }),
+                hasCode('invalid_storage'),
+            );
+            assert.equal(fs.readFileSync(externalProjectPath, 'utf8'), before);
+        } finally {
+            try {
+                fs.unlinkSync(projectDirectory);
+            } catch {
+                // The test assertion may fail before the link is created.
+            }
+            fs.rmSync(externalDirectory, { recursive: true, force: true });
+        }
+    });
+
+    test('rejects a linked storage root before creating project files outside it', () => {
+        const container = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-linked-root-container-'));
+        const linkedRoot = path.join(container, 'story-studio');
+        const externalDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-linked-root-external-'));
+        fs.symlinkSync(
+            externalDirectory,
+            linkedRoot,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        try {
+            assert.throws(
+                () => new StoryStudioStore(linkedRoot),
+                hasCode('invalid_storage'),
+            );
+            assert.deepEqual(fs.readdirSync(externalDirectory), []);
+        } finally {
+            try {
+                fs.unlinkSync(linkedRoot);
+            } catch {
+                // The assertion may fail before the link is created.
+            }
+            fs.rmSync(container, { recursive: true, force: true });
+            fs.rmSync(externalDirectory, { recursive: true, force: true });
+        }
+    });
+
+    test('rejects writes after the storage root is replaced by a junction', () => {
+        const { project } = store.createProject({ title: '根目录换链基线' });
+        const originalDirectory = `${rootDirectory}-original`;
+        const externalDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-root-swap-external-'));
+        fs.cpSync(rootDirectory, externalDirectory, { recursive: true });
+        fs.renameSync(rootDirectory, originalDirectory);
+        fs.symlinkSync(
+            externalDirectory,
+            rootDirectory,
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        const externalProjectPath = path.join(externalDirectory, 'projects', project.id, 'project.json');
+        const before = fs.readFileSync(externalProjectPath, 'utf8');
+        try {
+            assert.throws(
+                () => store.updateProject(project.id, project.version, { title: '不应越界写入' }),
+                hasCode('invalid_storage'),
+            );
+            assert.equal(fs.readFileSync(externalProjectPath, 'utf8'), before);
+        } finally {
+            try {
+                fs.unlinkSync(rootDirectory);
+            } catch {
+                // The assertion may fail before the link is created.
+            }
+            fs.renameSync(originalDirectory, rootDirectory);
+            fs.rmSync(externalDirectory, { recursive: true, force: true });
+        }
+    });
+
     test('20. keeps an async lock alive and stops its heartbeat after release', async () => {
         const { project } = store.createProject({ title: '长导出锁测试' });
         store.lockStaleMs = 80;

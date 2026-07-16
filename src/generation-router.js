@@ -97,11 +97,11 @@ export function createGenerationRouter(service) {
     }));
 
     router.get('/projects/:projectId/chapters/:chapterId/generations', (request, response) => {
-        response.send(service.generationStore.listGenerations(request.params.projectId, request.params.chapterId));
+        response.send(service.listGenerations(request.params.projectId, request.params.chapterId));
     });
 
     router.get('/projects/:projectId/chapters/:chapterId/generations/:generationId', (request, response) => {
-        response.send(service.generationStore.getGeneration(
+        response.send(service.getGeneration(
             request.params.projectId,
             request.params.chapterId,
             request.params.generationId,

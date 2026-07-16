@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
-import { ApiError } from './api-error.js';
+import { ApiError, createStoragePathGuard } from './api-error.js';
 import {
     RETRIEVAL_INDEX_SCHEMA_VERSION,
     RetrievalIndex,
@@ -288,16 +288,25 @@ function safeRerank(deterministicHits, reranked) {
 export class RetrievalStore {
     constructor(rootDirectory, { storyStore, reranker = null } = {}) {
         if (!storyStore) throw new TypeError('RetrievalStore requires a storyStore.');
-        this.rootDirectory = path.resolve(rootDirectory);
+        this.pathGuard = createStoragePathGuard(rootDirectory, {
+            label: 'Retrieval storage',
+            createError: (message, details) => (
+                new ApiError(500, 'unsafe_retrieval_path', message, details)
+            ),
+        });
+        this.rootDirectory = this.pathGuard.rootDirectory;
         this.storyStore = storyStore;
         this.reranker = typeof reranker === 'function' ? reranker : null;
         this.jobs = new Map();
         this.cache = new Map();
-        fs.mkdirSync(this.rootDirectory, { recursive: true });
+    }
+
+    storagePath(...segments) {
+        return this.pathGuard.resolvePath(...segments);
     }
 
     indexPath(projectId) {
-        return path.join(this.rootDirectory, cleanProjectId(projectId), 'index.json');
+        return this.storagePath(cleanProjectId(projectId), 'index.json');
     }
 
     readRecord(projectId) {
@@ -307,6 +316,7 @@ export class RetrievalStore {
             return null;
         }
         try {
+            this.pathGuard.assertPath(filePath);
             const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
             if (!isObject(value) || value.schemaVersion !== RETRIEVAL_INDEX_SCHEMA_VERSION
                 || value.projectId !== projectId || !isObject(value.index)) {
@@ -329,14 +339,16 @@ export class RetrievalStore {
                 ...value,
                 index,
             };
-        } catch {
+        } catch (error) {
+            if (error?.code === 'unsafe_retrieval_path') throw error;
             this.cache.delete(projectId);
             return null;
         }
     }
 
     writeRecord(record) {
-        fs.mkdirSync(path.dirname(this.indexPath(record.projectId)), { recursive: true });
+        const filePath = this.indexPath(record.projectId);
+        this.pathGuard.ensureDirectory(path.dirname(filePath));
         const payload = {
             schemaVersion: RETRIEVAL_INDEX_SCHEMA_VERSION,
             projectId: record.projectId,
@@ -348,7 +360,9 @@ export class RetrievalStore {
             lastDiff: record.lastDiff ?? null,
             index: record.index.toJSON(),
         };
-        writeFileAtomicSync(this.indexPath(record.projectId), JSON.stringify(payload, null, 2), { encoding: 'utf8' });
+        const serialized = JSON.stringify(payload, null, 2);
+        this.pathGuard.assertPath(filePath);
+        writeFileAtomicSync(filePath, serialized, { encoding: 'utf8' });
         this.cache.set(record.projectId, { indexDigest: record.indexDigest, index: record.index });
         return { ...record, ...payload, index: record.index };
     }

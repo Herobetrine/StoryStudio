@@ -237,6 +237,59 @@ describe('generation, distillation, and atomic adoption API', () => {
         assert.ok(nextPreview.body.diagnostics.storyContext.items.some(item => item.id === 'char-lin'));
     });
 
+    test('does not expose generation sidecars after the authoritative chapter is deleted', async () => {
+        const created = await request(app)
+            .post('/api/story-studio/projects')
+            .set('Host', LOCAL_HOST)
+            .set('X-CSRF-Token', csrfToken)
+            .send({ title: '候选孤儿隔离' })
+            .expect(201);
+        const projectId = created.body.project.id;
+        chapterId = created.body.chapter.id;
+        const streamed = await request(app)
+            .post(`/api/story-studio/projects/${projectId}/chapters/${chapterId}/generations/stream`)
+            .set('Host', LOCAL_HOST)
+            .set('X-CSRF-Token', csrfToken)
+            .send({
+                kind: 'draft',
+                mode: 'generate',
+                projectVersion: created.body.project.version,
+                chapterRevision: created.body.chapter.revision,
+            })
+            .buffer(true)
+            .parse(textParser)
+            .expect(200);
+        const generationId = streamed.body.trim().split('\n').map(line => JSON.parse(line))[0].generationId;
+        const added = await request(app)
+            .post(`/api/story-studio/projects/${projectId}/chapters`)
+            .set('Host', LOCAL_HOST)
+            .set('X-CSRF-Token', csrfToken)
+            .send({
+                projectVersion: created.body.project.version,
+                chapter: { title: '保留章节' },
+            })
+            .expect(201);
+        await request(app)
+            .delete(`/api/story-studio/projects/${projectId}/chapters/${chapterId}`)
+            .set('Host', LOCAL_HOST)
+            .set('X-CSRF-Token', csrfToken)
+            .send({
+                projectVersion: added.body.project.version,
+                chapterRevision: created.body.chapter.revision,
+                activeChapterId: added.body.chapter.id,
+            })
+            .expect(200);
+
+        await request(app)
+            .get(`/api/story-studio/projects/${projectId}/chapters/${chapterId}/generations`)
+            .set('Host', LOCAL_HOST)
+            .expect(404, { error: 'not_found', message: 'Resource not found.' });
+        await request(app)
+            .get(`/api/story-studio/projects/${projectId}/chapters/${chapterId}/generations/${generationId}`)
+            .set('Host', LOCAL_HOST)
+            .expect(404, { error: 'not_found', message: 'Resource not found.' });
+    });
+
     test('refuses to replace newer formal text with a candidate generated from an older revision', async () => {
         const created = await request(app)
             .post('/api/story-studio/projects')

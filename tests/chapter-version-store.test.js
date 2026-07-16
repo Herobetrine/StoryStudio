@@ -267,4 +267,33 @@ describe('append-only chapter version history', () => {
             addedCharacters: 1,
         });
     });
+
+    test('does not publish staging or final versions through a linked chapter directory', t => {
+        const externalRoot = path.join(root, 'external-root');
+        const linkedRoot = path.join(root, 'linked-root');
+        const projectDirectory = path.join(root, 'project-one');
+        const externalChapter = path.join(root, '..', `${path.basename(root)}-external-chapter`);
+        t.after(() => fs.rmSync(externalChapter, { recursive: true, force: true }));
+        fs.mkdirSync(externalRoot);
+        fs.symlinkSync(externalRoot, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir');
+        assert.throws(
+            () => new ChapterVersionStore(linkedRoot),
+            error => error instanceof ChapterVersionStoreError && error.code === 'unsafe_version_path',
+        );
+        assert.deepEqual(fs.readdirSync(externalRoot), []);
+
+        fs.mkdirSync(projectDirectory, { recursive: true });
+        fs.mkdirSync(externalChapter, { recursive: true });
+        fs.symlinkSync(
+            externalChapter,
+            path.join(projectDirectory, 'chapter-one'),
+            process.platform === 'win32' ? 'junction' : 'dir',
+        );
+
+        assert.throws(
+            () => store.appendVersion(input()),
+            error => error instanceof ChapterVersionStoreError && error.code === 'unsafe_version_path',
+        );
+        assert.deepEqual(fs.readdirSync(externalChapter), []);
+    });
 });

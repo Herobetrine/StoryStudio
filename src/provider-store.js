@@ -3,6 +3,8 @@ import path from 'node:path';
 
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
+import { ApiError, createStoragePathGuard } from './api-error.js';
+
 export const PROVIDER_PROTOCOLS = Object.freeze([
     'openai-chat',
     'anthropic-messages',
@@ -170,20 +172,24 @@ function normalizeStoredConfig(value) {
     return result;
 }
 
-function readJsonOrDefault(filePath, fallback) {
+function readJsonOrDefault(filePath, fallback, pathGuard) {
+    const safePath = pathGuard.assertPath(filePath);
     try {
-        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        return JSON.parse(fs.readFileSync(safePath, 'utf8'));
     } catch (error) {
         if (error.code === 'ENOENT') return fallback;
         throw error;
     }
 }
 
-function writeJson(filePath, value, mode) {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    writeFileAtomicSync(filePath, JSON.stringify(value, null, 2), { encoding: 'utf8', mode });
+function writeJson(filePath, value, mode, pathGuard) {
+    const safePath = pathGuard.assertPath(filePath);
+    pathGuard.ensureDirectory(path.dirname(safePath));
+    pathGuard.assertPath(safePath);
+    writeFileAtomicSync(safePath, JSON.stringify(value, null, 2), { encoding: 'utf8', mode });
+    pathGuard.assertPath(safePath);
     try {
-        fs.chmodSync(filePath, mode);
+        fs.chmodSync(safePath, mode);
     } catch (error) {
         if (process.platform !== 'win32') throw error;
     }
@@ -197,14 +203,23 @@ export function maskApiKey(apiKey) {
 
 export class ProviderStore {
     constructor(dataRoot) {
-        this.dataRoot = path.resolve(dataRoot);
-        this.configPath = path.join(this.dataRoot, 'provider.json');
-        this.secretsPath = path.join(this.dataRoot, 'secrets.json');
-        fs.mkdirSync(this.dataRoot, { recursive: true });
+        this.pathGuard = createStoragePathGuard(dataRoot, {
+            label: 'Provider storage',
+            createError: (message, details) => (
+                new ApiError(500, 'unsafe_provider_path', message, details)
+            ),
+        });
+        this.dataRoot = this.pathGuard.rootDirectory;
+        this.configPath = this.storagePath('provider.json');
+        this.secretsPath = this.storagePath('secrets.json');
+    }
+
+    storagePath(...segments) {
+        return this.pathGuard.resolvePath(...segments);
     }
 
     readSecrets(settings, { allowLegacy = false } = {}) {
-        const value = readJsonOrDefault(this.secretsPath, {});
+        const value = readJsonOrDefault(this.secretsPath, {}, this.pathGuard);
         const apiKey = typeof value?.apiKey === 'string' ? value.apiKey : '';
         if (!apiKey) return { apiKey: '' };
 
@@ -219,7 +234,7 @@ export class ProviderStore {
     }
 
     getResolved() {
-        const stored = readJsonOrDefault(this.configPath, {});
+        const stored = readJsonOrDefault(this.configPath, {}, this.pathGuard);
         const settings = normalizeStoredConfig(stored);
         const allowLegacy = stored?.protocol === undefined;
         return { ...settings, ...this.readSecrets(settings, { allowLegacy }) };
@@ -267,12 +282,12 @@ export class ProviderStore {
         const next = this.resolve(changes);
 
         const config = Object.fromEntries(CONFIG_FIELDS.map(field => [field, next[field]]));
-        writeJson(this.configPath, config, 0o600);
+        writeJson(this.configPath, config, 0o600, this.pathGuard);
         writeJson(this.secretsPath, {
             apiKey: next.apiKey,
             origin: new URL(next.baseUrl).origin,
             protocol: next.protocol,
-        }, 0o600);
+        }, 0o600, this.pathGuard);
         return this.getPublic();
     }
 }

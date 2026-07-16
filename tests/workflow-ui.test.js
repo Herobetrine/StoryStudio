@@ -58,10 +58,48 @@ describe('declarative workflow UI contract', () => {
         assert.match(app, /bindWorkflowWorkspace\(project, chapter\)/);
         assert.match(app, /const selectedRunId = state\.workflowRunId;[\s\S]*await loadWorkflowRun\(selectedRunId\)/);
         assert.match(app, /error instanceof ApiError && error\.status === 409/);
-        assert.match(app, /async function refreshWorkflowAuthority\([\s\S]*acceptServerProject\(project, new Set\(\)\)[\s\S]*acceptServerChapter\(chapter, new Set\(\)\)/);
+        const loadRun = app.slice(
+            app.indexOf('async function loadWorkflowRun('),
+            app.indexOf('async function loadWorkflowWorkspace('),
+        );
+        assert.match(loadRun, /applyWorkflowPayload\(payload, \{ replaceArtifacts: true \}\);[\s\S]*workflowAuthorityRequiresRefresh\(\)[\s\S]*refreshWorkflowAuthority\(projectId, chapterId, requestSerial\)/);
+        const authorityRefresh = app.slice(
+            app.indexOf('async function refreshWorkflowAuthority('),
+            app.indexOf('async function sendWorkflowCommand('),
+        );
+        assert.match(authorityRefresh, /\/chapters\/\$\{encodeURIComponent\(chapterId\)\}\/authority/);
+        assert.doesNotMatch(authorityRefresh, /Promise\.all\(/);
+        assert.match(authorityRefresh, /acceptServerProject\(project\);[\s\S]*acceptServerChapter\(chapter\);/);
+        assert.match(authorityRefresh, /scheduleAutosave\(\);[\s\S]*setSaveStatus\('保存中', 'saving'\);[\s\S]*clearDirtyState\(\);/);
+        assert.doesNotMatch(authorityRefresh, /acceptServer(Project|Chapter)\([^)]*new Set\(\)/);
         assert.match(app, /error instanceof ApiError && error\.status === 409[\s\S]*await refreshWorkflowAuthority\(projectId, chapterId, requestSerial\)[\s\S]*await loadWorkflowRun\(selectedRunId\)/);
         assert.match(app, /state\.workflowRetry = \{ kind: 'command', descriptor \}/);
         assert.match(app, /sendWorkflowCommand\(descriptor\.type, descriptor\.payload, descriptor\)/);
+        const createRunSource = app.slice(
+            app.indexOf('async function createWorkflowRun('),
+            app.indexOf('function workflowCommandId('),
+        );
+        assert.ok(
+            createRunSource.indexOf('state.workflowBusy = true;')
+                < createRunSource.indexOf('await enqueueSave()'),
+        );
+        assert.ok(
+            createRunSource.indexOf("beginAuthorityMutation('workflow')")
+                < createRunSource.indexOf('await enqueueSave()'),
+        );
+        assert.match(createRunSource, /workflowBindingMatches\(projectId, chapterId\)[\s\S]*state\.workflowDefinitionId !== definitionId/);
+        assert.match(createRunSource, /finishAuthorityMutation\(authorityMutationToken\)/);
+        assert.match(app, /state\.workflowBusy && !state\.workflowCommandController/);
+        assert.match(app, /state\.workflowCommandController = commandController;\s*renderWorkflowWorkspace\(\);/);
+        const cancelSource = app.slice(
+            app.indexOf('async function cancelWorkflowRun('),
+            app.indexOf('function executeCurrentWorkflowStep('),
+        );
+        assert.match(cancelSource, /state\.workflowBusy && !state\.workflowCommandController/);
+        assert.match(cancelSource, /executingController\?\.abort\(/);
+        assert.match(cancelSource, /state\.workflowBusy = false;/);
+        assert.match(cancelSource, /workflowAuthorityRequiresRefresh\(response\?\.authority\)[\s\S]*refreshWorkflowAuthority\(projectId, chapterId, requestSerial\)/);
+        assert.match(cancelSource, /await loadWorkflowRun\(run\.id, \{ preserveError: true \}\)/);
     });
 
     test('renders authoritative state, diagnostics, artifacts, and the definition-sized status track', () => {

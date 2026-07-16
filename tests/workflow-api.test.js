@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import request from 'supertest';
 
 import { createApp } from '../src/app.js';
-import { WorkflowStore } from '../src/workflow-store.js';
+import {
+    countContentUnits,
+    STORY_STUDIO_SCHEMA_VERSION,
+} from '../src/story-studio-store.js';
+import { hashWorkflowValue, WorkflowStore } from '../src/workflow-store.js';
 
 const LOCAL_HOST = '127.0.0.1:8123';
 
@@ -35,6 +39,84 @@ function sseResponse(content) {
 
 function write(builder, csrfToken) {
     return builder.set('Host', LOCAL_HOST).set('X-CSRF-Token', csrfToken);
+}
+
+function digestWithout(value, fields) {
+    const copy = structuredClone(value);
+    for (const field of fields) delete copy[field];
+    return hashWorkflowValue(copy);
+}
+
+function snapshotTree(rootDirectory) {
+    const snapshot = {};
+    const visit = (directory, prefix = '') => {
+        snapshot[prefix || '.'] = 'directory';
+        for (const entry of fs.readdirSync(directory, { withFileTypes: true })
+            .sort((left, right) => left.name.localeCompare(right.name))) {
+            const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+            const filePath = path.join(directory, entry.name);
+            if (entry.isDirectory()) {
+                visit(filePath, relativePath);
+            } else if (entry.isSymbolicLink()) {
+                snapshot[relativePath] = `link:${fs.readlinkSync(filePath)}`;
+            } else {
+                snapshot[relativePath] = fs.readFileSync(filePath).toString('base64');
+            }
+        }
+    };
+    visit(rootDirectory);
+    return snapshot;
+}
+
+function installPendingChapterWrite(dataRoot, project, chapter) {
+    const timestamp = new Date(Date.parse(project.updatedAt) + 1_000).toISOString();
+    const targetChapter = {
+        ...structuredClone(chapter),
+        content: '只应由写请求恢复的待发布正文。',
+        revision: chapter.revision + 1,
+        updatedAt: timestamp,
+    };
+    targetChapter.wordCount = countContentUnits(targetChapter.content);
+    const targetProject = {
+        ...structuredClone(project),
+        chapters: project.chapters.map(item => item.id === chapter.id ? {
+            ...item,
+            wordCount: targetChapter.wordCount,
+            updatedAt: timestamp,
+        } : item),
+        chapterBytes: Buffer.byteLength(JSON.stringify(targetChapter), 'utf8'),
+        version: project.version + 1,
+        updatedAt: timestamp,
+    };
+    const journal = {
+        transactionId: 'workflow-readonly-pending-write',
+        baseProjectVersion: project.version,
+        baseProjectDigest: hashWorkflowValue(project),
+        baseProjectInvariantDigest: digestWithout(
+            project,
+            ['chapters', 'chapterBytes', 'storyState', 'version', 'updatedAt'],
+        ),
+        baseChapterIds: project.chapters.map(item => item.id),
+        baseProjectChapterBytes: project.chapterBytes,
+        baseChapterDigest: hashWorkflowValue(chapter),
+        baseChapterBytes: Buffer.byteLength(JSON.stringify(chapter), 'utf8'),
+        baseChapterRevision: chapter.revision,
+        baseChapterNumber: chapter.number,
+        baseChapterCreatedAt: chapter.createdAt,
+        baseChapterVolumeId: chapter.volumeId,
+        baseChapterPlanBasis: structuredClone(chapter.planBasis),
+        project: targetProject,
+        chapter: targetChapter,
+    };
+    const journalPath = path.join(
+        dataRoot,
+        'story-studio',
+        'projects',
+        project.id,
+        '.pending-write.json',
+    );
+    fs.writeFileSync(journalPath, JSON.stringify(journal, null, 2), 'utf8');
+    return { journalPath, targetProject, targetChapter };
 }
 
 describe('declarative workflow HTTP lifecycle', () => {
@@ -313,6 +395,114 @@ describe('declarative workflow HTTP lifecycle', () => {
         assert.equal(replayed.body.run.currentStepId, 'propose-card');
         assert.equal(replayed.body.command.replayed, true);
         assert.equal(fs.existsSync(receiptPath), true);
+    });
+
+    test('keeps Workflow GET pure when an authoritative write journal awaits recovery', async () => {
+        const created = await write(request(app).post('/api/story-studio/projects'), csrfToken).send({
+            title: '只读流程日志恢复边界',
+        }).expect(201);
+        const projectId = created.body.project.id;
+        chapterId = created.body.chapter.id;
+        const basePath = `/api/story-studio/projects/${projectId}/chapters/${chapterId}`;
+        const definition = (await request(app)
+            .get('/api/story-studio/workflows/definitions')
+            .set('Host', LOCAL_HOST)
+            .expect(200)).body.definitions.find(item => item.id === 'builtin.chapter-cycle.v1');
+        const startPayload = {
+            commandId: 'workflow-readonly-pending-journal',
+            definitionId: definition.id,
+            definitionHash: definition.definitionHash,
+            projectVersion: created.body.project.version,
+            chapterRevision: created.body.chapter.revision,
+            input: {},
+        };
+        const view = (await write(
+            request(app).post(`${basePath}/workflow-runs`),
+            csrfToken,
+        ).send(startPayload).expect(201)).body;
+        const projectPath = path.join(dataRoot, 'story-studio', 'projects', projectId, 'project.json');
+        const chapterPath = path.join(dataRoot, 'story-studio', 'projects', projectId, 'chapters', `${chapterId}.json`);
+        const project = JSON.parse(fs.readFileSync(projectPath, 'utf8'));
+        const chapter = JSON.parse(fs.readFileSync(chapterPath, 'utf8'));
+        const pending = installPendingChapterWrite(dataRoot, project, chapter);
+        const before = snapshotTree(dataRoot);
+
+        for (const endpoint of [
+            `${basePath}/workflow-runs`,
+            `${basePath}/workflow-runs/${view.run.id}`,
+        ]) {
+            const response = await request(app).get(endpoint).set('Host', LOCAL_HOST);
+            assert.equal(response.status, 409);
+            assert.equal(response.body.error, 'recovery_required');
+            assert.equal(response.body.journal, 'project-write');
+            assert.deepEqual(snapshotTree(dataRoot), before);
+        }
+
+        const recovered = await write(
+            request(app).post(`${basePath}/workflow-runs`),
+            csrfToken,
+        ).send(startPayload).expect(201);
+        assert.equal(recovered.body.authority.projectVersion, pending.targetProject.version);
+        assert.equal(recovered.body.authority.chapterRevision, pending.targetChapter.revision);
+        assert.equal(fs.existsSync(pending.journalPath), false);
+        assert.equal(JSON.parse(fs.readFileSync(chapterPath, 'utf8')).content, pending.targetChapter.content);
+    });
+
+    test('keeps Workflow GET pure when authority still requires V4 to V5 migration', async () => {
+        const created = await write(request(app).post('/api/story-studio/projects'), csrfToken).send({
+            title: '只读流程迁移边界',
+        }).expect(201);
+        const projectId = created.body.project.id;
+        chapterId = created.body.chapter.id;
+        const basePath = `/api/story-studio/projects/${projectId}/chapters/${chapterId}`;
+        const definition = (await request(app)
+            .get('/api/story-studio/workflows/definitions')
+            .set('Host', LOCAL_HOST)
+            .expect(200)).body.definitions.find(item => item.id === 'builtin.chapter-cycle.v1');
+        const startPayload = {
+            commandId: 'workflow-readonly-schema-migration',
+            definitionId: definition.id,
+            definitionHash: definition.definitionHash,
+            projectVersion: created.body.project.version,
+            chapterRevision: created.body.chapter.revision,
+            input: {},
+        };
+        const view = (await write(
+            request(app).post(`${basePath}/workflow-runs`),
+            csrfToken,
+        ).send(startPayload).expect(201)).body;
+        const projectPath = path.join(dataRoot, 'story-studio', 'projects', projectId, 'project.json');
+        const chapterPath = path.join(dataRoot, 'story-studio', 'projects', projectId, 'chapters', `${chapterId}.json`);
+        const project = JSON.parse(fs.readFileSync(projectPath, 'utf8'));
+        const chapter = JSON.parse(fs.readFileSync(chapterPath, 'utf8'));
+        project.schemaVersion = 4;
+        chapter.schemaVersion = 4;
+        delete project.storyState.facts;
+        delete project.storyState.knowledge;
+        delete project.storyState.timeline;
+        project.chapterBytes = Buffer.byteLength(JSON.stringify(chapter), 'utf8');
+        fs.writeFileSync(projectPath, JSON.stringify(project, null, 2), 'utf8');
+        fs.writeFileSync(chapterPath, JSON.stringify(chapter, null, 2), 'utf8');
+        const before = snapshotTree(dataRoot);
+
+        for (const endpoint of [
+            `${basePath}/workflow-runs`,
+            `${basePath}/workflow-runs/${view.run.id}`,
+        ]) {
+            const response = await request(app).get(endpoint).set('Host', LOCAL_HOST);
+            assert.equal(response.status, 500);
+            assert.equal(response.body.error, 'migration_required');
+            assert.deepEqual(snapshotTree(dataRoot), before);
+        }
+
+        await write(
+            request(app).post(`${basePath}/workflow-runs`),
+            csrfToken,
+        ).send(startPayload).expect(201);
+        assert.equal(JSON.parse(fs.readFileSync(projectPath, 'utf8')).schemaVersion, STORY_STUDIO_SCHEMA_VERSION);
+        assert.equal(JSON.parse(fs.readFileSync(chapterPath, 'utf8')).schemaVersion, STORY_STUDIO_SCHEMA_VERSION);
+        assert.notDeepEqual(snapshotTree(dataRoot), before);
+        assert.equal(fs.existsSync(path.join(dataRoot, 'migration-backups', projectId)), true);
     });
 
     test('keeps Copilot diagnosis and card proposal side-effect free', async () => {
