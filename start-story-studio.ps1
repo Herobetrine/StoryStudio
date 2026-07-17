@@ -7,6 +7,28 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
+function Get-StoryStudioFileSha256 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath
+    )
+
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '')
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     throw 'Node.js 20 or newer is required.'
 }
@@ -39,7 +61,7 @@ elseif (Test-Path -LiteralPath $lockfilePath) {
 else {
     $packageJsonPath
 }
-$dependencyFingerprint = (Get-FileHash -LiteralPath $dependencyManifestPath -Algorithm SHA256).Hash
+$dependencyFingerprint = Get-StoryStudioFileSha256 -LiteralPath $dependencyManifestPath
 $dependencyFingerprintPath = Join-Path $PSScriptRoot 'node_modules\.story-studio-dependencies.sha256'
 
 $needsInstall = -not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'node_modules'))

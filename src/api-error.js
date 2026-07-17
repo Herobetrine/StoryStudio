@@ -1,5 +1,16 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+
+const WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x400;
+const WINDOWS_NOT_A_REPARSE_POINT_ERROR = 4390;
+const WINDOWS_ATTRIBUTE_CACHE_LIMIT = 128;
+const windowsAttributeCache = new Map();
+const WINDOWS_ATTRIBUTE_COMMAND = [
+    '$ErrorActionPreference = "Stop"',
+    '$attributes = [int][System.IO.File]::GetAttributes($env:STORY_STUDIO_ATTRIBUTE_PATH)',
+    '[Console]::Out.Write($attributes)',
+].join('; ');
 
 export class ApiError extends Error {
     constructor(status, code, message, details = {}) {
@@ -31,6 +42,103 @@ function comparableRealPath(filePath) {
     return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
+function sameFileIdentity(left, right) {
+    return left.dev === right.dev && left.ino === right.ino;
+}
+
+function firstWindowsErrorCode(output) {
+    const firstLine = output.trimStart().split(/\r?\n/u, 1)[0];
+    const match = firstLine.match(/^[^\d\r\n]{0,64}(\d+)\s*:/u);
+    return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function windowsFileAttributes(filePath, identity, realPath, fail, label) {
+    const cacheKey = comparableRealPath(filePath);
+    const comparableResolvedRealPath = comparableRealPath(realPath);
+    const cached = windowsAttributeCache.get(cacheKey);
+    if (
+        cached
+        && sameFileIdentity(cached, identity)
+        && cached.ctimeNs === identity.ctimeNs
+        && cached.realPath === comparableResolvedRealPath
+    ) {
+        return cached.attributes;
+    }
+
+    const windowsRoot = process.env.SystemRoot || process.env.WINDIR || String.raw`C:\Windows`;
+    const powershell = path.join(
+        windowsRoot,
+        'System32',
+        'WindowsPowerShell',
+        'v1.0',
+        'powershell.exe',
+    );
+    const fsutil = path.join(windowsRoot, 'System32', 'fsutil.exe');
+    const fsutilResult = spawnSync(fsutil, ['reparsepoint', 'query', filePath], {
+        encoding: 'utf8',
+        timeout: 5_000,
+        windowsHide: true,
+    });
+    const fsutilOutput = `${fsutilResult.stdout ?? ''}\n${fsutilResult.stderr ?? ''}`;
+    let attributes;
+    if (!fsutilResult.error && fsutilResult.status === 0) {
+        attributes = WINDOWS_REPARSE_POINT_ATTRIBUTE;
+    } else if (
+        !fsutilResult.error
+        && fsutilResult.status === 1
+        && firstWindowsErrorCode(fsutilOutput) === WINDOWS_NOT_A_REPARSE_POINT_ERROR
+    ) {
+        attributes = 0;
+    } else {
+        const powershellResult = spawnSync(powershell, [
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            WINDOWS_ATTRIBUTE_COMMAND,
+        ], {
+            encoding: 'utf8',
+            env: {
+                ...process.env,
+                STORY_STUDIO_ATTRIBUTE_PATH: filePath,
+            },
+            timeout: 5_000,
+            windowsHide: true,
+        });
+        const output = powershellResult.stdout?.trim() ?? '';
+        if (
+            powershellResult.error
+            || powershellResult.status !== 0
+            || !/^\d+$/u.test(output)
+        ) {
+            fail(`${label} root ancestor could not be verified.`, filePath, {
+                cause: powershellResult.error?.code
+                    ?? fsutilResult.error?.code
+                    ?? `attribute_probe_exit_${powershellResult.status ?? 'unknown'}`,
+                realPath,
+            });
+        }
+        attributes = Number.parseInt(output, 10);
+    }
+
+    if (
+        identity.dev !== 0n
+        && identity.ino !== 0n
+    ) {
+        if (windowsAttributeCache.size >= WINDOWS_ATTRIBUTE_CACHE_LIMIT) {
+            windowsAttributeCache.delete(windowsAttributeCache.keys().next().value);
+        }
+        windowsAttributeCache.set(cacheKey, {
+            attributes,
+            ctimeNs: identity.ctimeNs,
+            dev: identity.dev,
+            ino: identity.ino,
+            realPath: comparableResolvedRealPath,
+        });
+    }
+    return attributes;
+}
+
 function assertNoLinkedAncestors(targetPath, fail, label) {
     const resolvedTarget = path.resolve(targetPath);
     const parsed = path.parse(resolvedTarget);
@@ -43,6 +151,7 @@ function assertNoLinkedAncestors(targetPath, fail, label) {
         components.push(current);
     }
 
+    let previousWindowsRealPath = null;
     for (const component of components) {
         const stat = lstatIfPresent(component);
         if (!stat) continue;
@@ -61,11 +170,48 @@ function assertNoLinkedAncestors(targetPath, fail, label) {
                     cause: error?.code ?? error?.message,
                 });
             }
-            if (comparableRealPath(realPath) !== comparableRealPath(component)) {
-                fail(`${label} root cannot traverse reparse points.`, component, {
+            const expectedRealPath = previousWindowsRealPath === null
+                ? component
+                : path.join(previousWindowsRealPath, path.basename(component));
+            if (comparableRealPath(realPath) !== comparableRealPath(expectedRealPath)) {
+                if (component === parsed.root) {
+                    fail(`${label} root cannot traverse redirected volume roots.`, component, {
+                        realPath,
+                    });
+                }
+                let componentIdentity;
+                let realPathIdentity;
+                try {
+                    componentIdentity = fs.lstatSync(component, { bigint: true });
+                    realPathIdentity = fs.lstatSync(realPath, { bigint: true });
+                } catch (error) {
+                    fail(`${label} root ancestor could not be verified.`, component, {
+                        cause: error?.code ?? error?.message,
+                        realPath,
+                    });
+                }
+                const attributes = windowsFileAttributes(
+                    component,
+                    componentIdentity,
                     realPath,
-                });
+                    fail,
+                    label,
+                );
+                if ((attributes & WINDOWS_REPARSE_POINT_ATTRIBUTE) !== 0) {
+                    fail(`${label} root cannot traverse reparse points.`, component, {
+                        realPath,
+                    });
+                }
+                // NTFS 8.3 names are alternate spellings of the same entry and
+                // carry no reparse attribute. Retain an identity check so every
+                // other canonicalization difference still fails closed.
+                if (!sameFileIdentity(componentIdentity, realPathIdentity)) {
+                    fail(`${label} root cannot traverse reparse points.`, component, {
+                        realPath,
+                    });
+                }
             }
+            previousWindowsRealPath = realPath;
         }
     }
 }

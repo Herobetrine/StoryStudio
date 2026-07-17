@@ -385,7 +385,9 @@ describe('release package contract', () => {
     test('keeps the PowerShell launcher usable with and without a publishable lockfile', () => {
         assert.match(startScript, /package-lock\.json/);
         assert.match(startScript, /npm-shrinkwrap\.json/);
-        assert.match(startScript, /Get-FileHash/);
+        assert.doesNotMatch(startScript, /Get-FileHash/);
+        assert.match(startScript, /\[System\.Security\.Cryptography\.SHA256\]::Create\(\)/);
+        assert.match(startScript, /\[System\.BitConverter\]::ToString/);
         assert.match(startScript, /\.story-studio-dependencies\.sha256/);
         assert.match(startScript, /npm\.cmd ls --omit=dev --all/);
         assert.match(startScript, /npm\.cmd ci --omit=dev/);

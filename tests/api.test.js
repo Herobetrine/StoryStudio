@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +7,7 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 
 import request from 'supertest';
 
+import { createStoragePathGuard } from '../src/api-error.js';
 import { createApp } from '../src/app.js';
 
 const LOCAL_HOST = '127.0.0.1:8123';
@@ -43,6 +45,86 @@ afterEach(() => {
 });
 
 describe('local HTTP security and Story Studio API', () => {
+    test('accepts a normal Windows directory addressed by an NTFS 8.3 alias', {
+        skip: process.platform !== 'win32',
+    }, context => {
+        const longRoot = fs.mkdtempSync(path.join(
+            os.tmpdir(),
+            'story-studio-long-directory-for-short-name-',
+        ));
+        try {
+            assert.equal(longRoot.includes('"'), false);
+            const result = spawnSync(
+                process.env.ComSpec || 'cmd.exe',
+                ['/d', '/s', '/c', `for %I in ("${longRoot}") do @echo %~sI`],
+                {
+                    encoding: 'utf8',
+                    windowsHide: true,
+                    windowsVerbatimArguments: true,
+                },
+            );
+            assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
+            const shortRoot = result.stdout.trim();
+            assert.ok(shortRoot);
+            if (shortRoot.toLowerCase() === longRoot.toLowerCase()) {
+                context.skip('NTFS 8.3 aliases are unavailable on this volume.');
+                return;
+            }
+
+            assert.equal(fs.lstatSync(shortRoot).isSymbolicLink(), false);
+            assert.equal(
+                fs.realpathSync.native(shortRoot).toLowerCase(),
+                fs.realpathSync.native(longRoot).toLowerCase(),
+            );
+            const storageRoot = path.join(shortRoot, 'data');
+            const guard = createStoragePathGuard(storageRoot, {
+                label: 'Test',
+                createError: (message, details) => Object.assign(new Error(message), { details }),
+            });
+
+            assert.equal(guard.rootDirectory, path.resolve(storageRoot));
+            assert.equal(fs.statSync(path.join(longRoot, 'data')).isDirectory(), true);
+        } finally {
+            fs.rmSync(longRoot, { recursive: true, force: true });
+        }
+    });
+
+    test('rejects a Windows reparse point even when lstat reports its target identity', {
+        skip: process.platform !== 'win32',
+    }, () => {
+        const container = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-followed-reparse-'));
+        const target = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-followed-reparse-target-'));
+        const linkedParent = path.join(container, 'linked-parent');
+        fs.symlinkSync(target, linkedParent, 'junction');
+        const originalLstatSync = fs.lstatSync;
+        try {
+            fs.lstatSync = (candidatePath, options) => (
+                path.resolve(candidatePath).toLowerCase() === path.resolve(linkedParent).toLowerCase()
+                    ? fs.statSync(candidatePath, options)
+                    : originalLstatSync(candidatePath, options)
+            );
+            assert.throws(
+                () => createStoragePathGuard(path.join(linkedParent, 'data'), {
+                    label: 'Test',
+                    createError: (message, details) => Object.assign(new Error(message), { details }),
+                }),
+                error => (
+                    error?.message === 'Test root cannot traverse reparse points.'
+                    && error?.details?.path === linkedParent
+                ),
+            );
+        } finally {
+            fs.lstatSync = originalLstatSync;
+            try {
+                fs.unlinkSync(linkedParent);
+            } catch {
+                // Preserve the original assertion if setup did not reach link creation.
+            }
+            fs.rmSync(container, { recursive: true, force: true });
+            fs.rmSync(target, { recursive: true, force: true });
+        }
+    });
+
     test('rejects a missing data root below an existing linked ancestor', () => {
         const container = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-linked-data-parent-'));
         const external = fs.mkdtempSync(path.join(os.tmpdir(), 'story-studio-linked-data-parent-target-'));
